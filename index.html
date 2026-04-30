@@ -2308,7 +2308,7 @@ function dayHasContent(d) {
   return !!(d && d.meals && ((d.meals.b && d.meals.b.length) || d.meals.d || (d.meals.snacks && d.meals.snacks.length) || (d.tasks && d.tasks.length)));
 }
 
-function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, recipeDB, onMealClick, onSettings }) {
+function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, recipeDB, onMealClick }) {
   const [selected, setSelected] = useState(() => {
     const idx = weekData.findIndex(d => d.today);
     return idx >= 0 ? idx : 0;
@@ -2409,13 +2409,6 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
           <span style={{ fontSize:20, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(-1)}>‹</span>
           <span style={{ fontSize:13, color:'#888', minWidth:90, textAlign:'center' }}>{weekRangeLabel(weekOffset)}</span>
           <span style={{ fontSize:20, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(1)}>›</span>
-          {onSettings && (
-            <span
-              onClick={onSettings}
-              title="Settings"
-              style={{ fontSize:18, color:'var(--text-dimmer)', cursor:'pointer', padding:'0 4px', marginLeft:4 }}
-            >⚙</span>
-          )}
         </div>
       </div>
 
@@ -3966,6 +3959,7 @@ function AutoPlanScreen({
   groceryList, setGroceryList,
   apiKey,
   catCache, setCatCache,
+  onSettings,
 }) {
   const [planOffset, setPlanOffset] = useState(0);
   const [daysByOffset, setDaysByOffset] = usePersistedState('ab.autoplan.daysByOffset', {});
@@ -4483,9 +4477,18 @@ function AutoPlanScreen({
 
   return (
     <div className="screen-body">
-      <div style={{ padding:'8px 20px 10px' }}>
+      <div style={{ padding:'8px 20px 10px', position:'relative' }}>
         <div style={{ fontSize:13, color:'var(--text-dimmer)' }}>Settings</div>
-        <div className="screen-title">Auto-Plan</div>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+          <div className="screen-title">Auto-Plan</div>
+          {onSettings && (
+            <span
+              onClick={onSettings}
+              title="Settings"
+              style={{ fontSize:20, color:'var(--text-dimmer)', cursor:'pointer', padding:'4px 8px' }}
+            >⚙</span>
+          )}
+        </div>
       </div>
 
       <div className="pane">
@@ -4784,7 +4787,6 @@ function App() {
           const r = recipeDB.find(x => x.name === name);
           if (r) handleRecipeDetail(r);
         }}
-        onSettings={() => setShowSettings(true)}
       />;
       case 1: return <GroceryScreen
         onTab={handleTab}
@@ -4815,6 +4817,7 @@ function App() {
         apiKey={apiKey}
         catCache={catCache}
         setCatCache={setCatCache}
+        onSettings={() => setShowSettings(true)}
       />;
       default: return <WeekScreen onTab={handleTab} recipeDB={recipeDB} />;
     }
