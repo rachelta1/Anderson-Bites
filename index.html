@@ -92,13 +92,31 @@ body {
     border-radius: 0 !important;
     box-shadow: none !important;
     margin: 0 !important;
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
-    padding-left: env(safe-area-inset-left);
-    padding-right: env(safe-area-inset-right);
+    padding: 0 !important;
+    padding-left: env(safe-area-inset-left) !important;
+    padding-right: env(safe-area-inset-right) !important;
   }
   .notch { display: none !important; }
-  .status-bar { display: none !important; }
+  /* Repurpose the (otherwise-empty) status-bar div as a top safe-area
+     spacer so headers sit under the notch, not over it. */
+  .status-bar {
+    display: block !important;
+    height: env(safe-area-inset-top) !important;
+    min-height: env(safe-area-inset-top);
+    padding: 0 !important;
+    background: transparent;
+  }
+  /* Extend the tab bar's background to the very bottom of the screen
+     so there's no empty strip in the home-indicator zone, but keep its
+     touchable icons above the home indicator via padding-bottom. */
+  .tab-bar {
+    height: calc(60px + env(safe-area-inset-bottom));
+    padding-bottom: calc(4px + env(safe-area-inset-bottom));
+  }
+  /* Without min-height:0 a flex child won't shrink below its content,
+     so tall screens (Grocery, Recipes) push the tab bar off-screen and
+     never let .pane become the actual scroller. This restores both. */
+  .screen-body, .pane, .screen-scroll { min-height: 0; }
 }
 
 /* ── Phone Shell ── */
