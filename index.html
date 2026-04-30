@@ -603,7 +603,8 @@ localStorage.removeItem = function(k) {
   if (shouldSync(k)) schedulePush();
 };
 
-async function pullFromCloud(user) {
+async function pullFromCloud(user, opts = {}) {
+  const { force = false } = opts;
   try {
     const snap = await getDoc(doc(db, 'households', user.uid));
     if (!snap.exists()) {
@@ -615,7 +616,7 @@ async function pullFromCloud(user) {
     const cloud = snap.data();
     const cloudUpdated = cloud.clientUpdatedAt || 0;
     const lastSync = parseInt(localStorage.getItem('ab.lastSync') || '0', 10);
-    if (cloudUpdated <= lastSync) {
+    if (!force && cloudUpdated <= lastSync) {
       console.log('[AB sync] cloud not newer than last sync, skip pull');
       return;
     }
@@ -647,6 +648,24 @@ onAuthStateChanged(auth, async (user) => {
   authListeners.forEach(cb => { try { cb(user); } catch {} });
 });
 
+// Auto-pull when the app regains focus / becomes visible. Covers the most
+// common "I edited on the other device, switch back here" case without any
+// manual refresh — and only fires when switching INTO the app, so we never
+// reload mid-edit.
+let lastAutoPull = 0;
+function maybeAutoPull() {
+  if (!currentUser) return;
+  // Throttle to at most once every 3s — focus + visibilitychange can both fire
+  const now = Date.now();
+  if (now - lastAutoPull < 3000) return;
+  lastAutoPull = now;
+  pullFromCloud(currentUser);
+}
+window.addEventListener('focus', maybeAutoPull);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') maybeAutoPull();
+});
+
 window.AB_FB = {
   ready: true,
   getUser: () => currentUser,
@@ -663,6 +682,7 @@ window.AB_FB = {
     currentUser = null;
   },
   syncNow: () => pushNow(),
+  pullNow: () => currentUser ? pullFromCloud(currentUser, { force: true }) : Promise.resolve(),
 };
 </script>
 
@@ -3312,6 +3332,41 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
 }
 
 /* ═══════════════════════════════════════════
+   CLOUD REFRESH BUTTON — manual pull from Firestore.
+   Hidden when not signed in. Spins briefly while pulling;
+   the page reload (if the cloud has fresh data) will replace it.
+═══════════════════════════════════════════ */
+function CloudRefreshButton() {
+  const [user, setUser] = useState(() => (window.AB_FB ? window.AB_FB.getUser() : null));
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!window.AB_FB) return;
+    return window.AB_FB.onAuth(setUser);
+  }, []);
+  if (!user) return null;
+  const click = async () => {
+    setBusy(true);
+    try { await window.AB_FB.pullNow(); }
+    finally { setBusy(false); }
+  };
+  return (
+    <span
+      onClick={busy ? null : click}
+      title="Sync from cloud"
+      style={{
+        fontSize:18,
+        color:'var(--text-dimmer)',
+        cursor:'pointer',
+        padding:'4px 6px',
+        display:'inline-block',
+        transform: busy ? 'rotate(180deg)' : 'none',
+        transition:'transform 0.4s',
+      }}
+    >↻</span>
+  );
+}
+
+/* ═══════════════════════════════════════════
    SCREEN: RECIPES
 ═══════════════════════════════════════════ */
 function SettingsSheet({ apiKey, setApiKey, onClose }) {
@@ -4726,13 +4781,16 @@ function AutoPlanScreen({
         <div style={{ fontSize:13, color:'var(--text-dimmer)' }}>Settings</div>
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
           <div className="screen-title">Auto-Plan</div>
-          {onSettings && (
-            <span
-              onClick={onSettings}
-              title="Settings"
-              style={{ fontSize:20, color:'var(--text-dimmer)', cursor:'pointer', padding:'4px 8px' }}
-            >⚙</span>
-          )}
+          <div style={{ display:'flex', alignItems:'center', gap:2 }}>
+            <CloudRefreshButton />
+            {onSettings && (
+              <span
+                onClick={onSettings}
+                title="Settings"
+                style={{ fontSize:20, color:'var(--text-dimmer)', cursor:'pointer', padding:'4px 8px' }}
+              >⚙</span>
+            )}
+          </div>
         </div>
       </div>
 
