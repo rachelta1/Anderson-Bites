@@ -59,6 +59,36 @@ body {
   padding: 20px;
 }
 
+/* ── Mobile / PWA: drop the desktop phone-frame chrome and fill the screen.
+   Triggers on narrow viewports OR when launched as an installed PWA.
+   Locks scrolling on html/body so iOS rubber-band overscroll can't drag
+   the whole layout around — the .pane inside each screen is the only
+   real scroller. Honors notch + home-indicator via safe-area-inset.   ── */
+@media (max-width: 480px), (display-mode: standalone) {
+  html, body {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+    position: fixed;
+  }
+  body {
+    padding: 0;
+    display: block;
+  }
+  .phone {
+    width: 100%;
+    height: 100%;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .notch { display: none; }
+  .status-bar { display: none; }
+}
+
 /* ── Phone Shell ── */
 .phone {
   width: 375px;
