@@ -515,6 +515,157 @@ window.addEventListener('error', e => {
   document.getElementById('root').innerHTML = '<pre style="color:#f55;padding:20px;font-family:monospace;font-size:12px;white-space:pre-wrap">' + (e.message || e.error?.message || 'unknown error') + '\n\n' + (e.error?.stack || e.filename + ':' + e.lineno) + '</pre>';
 });
 </script>
+
+<!-- ═══════════════════════════════════════════
+     FIREBASE — auth + Firestore-backed sync
+     Patches localStorage.setItem/removeItem so any
+     `ab.*` write debounce-pushes to /households/{uid}.
+     On sign-in, pulls cloud doc and reloads the page.
+═══════════════════════════════════════════ -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js';
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut as fbSignOut,
+} from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js';
+import {
+  getFirestore, doc, getDoc, setDoc, serverTimestamp,
+} from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDOQTSKFfPPF2IR2KokETDsehLWhIBlxeA",
+  authDomain: "anderson-bites.firebaseapp.com",
+  projectId: "anderson-bites",
+  storageBucket: "anderson-bites.firebasestorage.app",
+  messagingSenderId: "149106676177",
+  appId: "1:149106676177:web:fa320b229efe949b4850f0",
+  measurementId: "G-4H5QFDM99J",
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// Keys we don't sync — purely local bookkeeping.
+const SKIP_PREFIXES = ['ab.migration.', 'ab.lastSync'];
+const shouldSync = k =>
+  typeof k === 'string' && k.startsWith('ab.') &&
+  !SKIP_PREFIXES.some(p => k.startsWith(p));
+
+const origSetItem = localStorage.setItem.bind(localStorage);
+const origRemoveItem = localStorage.removeItem.bind(localStorage);
+
+let currentUser = null;
+let pulling = false;     // suppress push during pull
+let pushTimer = null;
+
+function snapshotLocal() {
+  const out = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (shouldSync(k)) out[k] = localStorage.getItem(k);
+  }
+  return out;
+}
+
+async function pushNow() {
+  if (!currentUser || pulling) return;
+  try {
+    const ts = Date.now();
+    const data = snapshotLocal();
+    await setDoc(doc(db, 'households', currentUser.uid), {
+      data,
+      updatedAt: serverTimestamp(),
+      clientUpdatedAt: ts,
+    });
+    origSetItem('ab.lastSync', String(ts));
+    console.log('[AB sync] pushed', Object.keys(data).length, 'keys');
+  } catch (e) {
+    console.warn('[AB sync] push failed', e);
+  }
+}
+
+function schedulePush() {
+  if (!currentUser || pulling) return;
+  if (pushTimer) clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => { pushTimer = null; pushNow(); }, 2000);
+}
+
+localStorage.setItem = function(k, v) {
+  origSetItem(k, v);
+  if (shouldSync(k)) schedulePush();
+};
+localStorage.removeItem = function(k) {
+  origRemoveItem(k);
+  if (shouldSync(k)) schedulePush();
+};
+
+async function pullFromCloud(user) {
+  try {
+    const snap = await getDoc(doc(db, 'households', user.uid));
+    if (!snap.exists()) {
+      // First time on this account — push local state up to seed the cloud doc.
+      console.log('[AB sync] no cloud doc yet, seeding from local');
+      await pushNow();
+      return;
+    }
+    const cloud = snap.data();
+    const cloudUpdated = cloud.clientUpdatedAt || 0;
+    const lastSync = parseInt(localStorage.getItem('ab.lastSync') || '0', 10);
+    if (cloudUpdated <= lastSync) {
+      console.log('[AB sync] cloud not newer than last sync, skip pull');
+      return;
+    }
+    pulling = true;
+    // Wipe local ab.* keys then write cloud values, then reload so React
+    // re-reads its initial state from the freshly-populated localStorage.
+    const keysToRemove = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (shouldSync(k)) keysToRemove.push(k);
+    }
+    keysToRemove.forEach(k => origRemoveItem(k));
+    const data = cloud.data || {};
+    Object.keys(data).forEach(k => origSetItem(k, data[k]));
+    origSetItem('ab.lastSync', String(cloudUpdated));
+    pulling = false;
+    console.log('[AB sync] pulled', Object.keys(data).length, 'keys, reloading');
+    window.location.reload();
+  } catch (e) {
+    console.warn('[AB sync] pull failed', e);
+    pulling = false;
+  }
+}
+
+const authListeners = new Set();
+onAuthStateChanged(auth, async (user) => {
+  currentUser = user;
+  if (user) await pullFromCloud(user);
+  authListeners.forEach(cb => { try { cb(user); } catch {} });
+});
+
+window.AB_FB = {
+  ready: true,
+  getUser: () => currentUser,
+  onAuth: (cb) => {
+    authListeners.add(cb);
+    cb(currentUser);
+    return () => authListeners.delete(cb);
+  },
+  signIn: (email, password) => signInWithEmailAndPassword(auth, email, password),
+  createAccount: (email, password) => createUserWithEmailAndPassword(auth, email, password),
+  signOut: async () => {
+    if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+    await fbSignOut(auth);
+    currentUser = null;
+  },
+  syncNow: () => pushNow(),
+};
+</script>
+
 <script type="text/babel" data-presets="react">
 const { useState, useCallback, useEffect } = React;
 
@@ -3166,6 +3317,49 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
 function SettingsSheet({ apiKey, setApiKey, onClose }) {
   const [val, setVal] = useState(apiKey || '');
   const [reveal, setReveal] = useState(false);
+  const [user, setUser] = useState(() => (window.AB_FB ? window.AB_FB.getUser() : null));
+  const [emailIn, setEmailIn] = useState('');
+  const [pwIn, setPwIn] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [authMsg, setAuthMsg] = useState('');
+
+  useEffect(() => {
+    if (!window.AB_FB) return;
+    return window.AB_FB.onAuth(setUser);
+  }, []);
+
+  const doAuth = async (mode) => {
+    const e = emailIn.trim();
+    const p = pwIn;
+    if (!e || !p) { setAuthMsg('Email and password required'); return; }
+    if (p.length < 6) { setAuthMsg('Password must be at least 6 characters'); return; }
+    setBusy(true);
+    setAuthMsg('');
+    try {
+      if (mode === 'create') {
+        await window.AB_FB.createAccount(e, p);
+      } else {
+        await window.AB_FB.signIn(e, p);
+      }
+      setEmailIn(''); setPwIn('');
+    } catch (err) {
+      const code = err.code || '';
+      if (code === 'auth/user-not-found') setAuthMsg('No account yet — tap Create account');
+      else if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') setAuthMsg('Wrong email or password');
+      else if (code === 'auth/email-already-in-use') setAuthMsg('Already exists — tap Sign in');
+      else if (code === 'auth/weak-password') setAuthMsg('Password too weak (6+ chars)');
+      else if (code === 'auth/invalid-email') setAuthMsg('Invalid email');
+      else setAuthMsg(err.message || 'Sign-in failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doSignOut = async () => {
+    setBusy(true);
+    try { await window.AB_FB.signOut(); } finally { setBusy(false); }
+  };
+
   const save = () => { setApiKey(val.trim()); onClose(); };
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -3175,6 +3369,57 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
           <div className="modal-title">Settings</div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
+
+        {/* Cloud sync / account */}
+        <div style={{ fontSize:13, color:'var(--text-dimmer)', marginBottom:6 }}>Cloud sync</div>
+        {!window.AB_FB ? (
+          <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:14 }}>Loading…</div>
+        ) : user ? (
+          <div style={{ marginBottom:14 }}>
+            <div style={{ fontSize:14, color:'var(--text)', marginBottom:4 }}>Signed in as {user.email}</div>
+            <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:8, lineHeight:1.5 }}>Recipes, plans, and lists sync across devices automatically.</div>
+            <div className="danger-btn" style={{ display:'inline-block', padding:'6px 14px' }} onClick={busy ? null : doSignOut}>
+              {busy ? '…' : 'Sign out'}
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginBottom:14 }}>
+            <input
+              className="text-input"
+              type="email"
+              value={emailIn}
+              onChange={e => setEmailIn(e.target.value)}
+              placeholder="email"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              style={{ marginBottom:6 }}
+            />
+            <input
+              className="text-input"
+              type="password"
+              value={pwIn}
+              onChange={e => setPwIn(e.target.value)}
+              placeholder="password"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+            />
+            {authMsg && <div style={{ fontSize:12, color:'#f88', marginTop:6 }}>{authMsg}</div>}
+            <div style={{ display:'flex', gap:8, marginTop:8 }}>
+              <div className="gen-btn" style={{ flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)' }} onClick={busy ? null : () => doAuth('create')}>
+                {busy ? '…' : 'Create account'}
+              </div>
+              <div className="gen-btn" style={{ flex:1 }} onClick={busy ? null : () => doAuth('signin')}>
+                {busy ? '…' : 'Sign in'}
+              </div>
+            </div>
+            <div style={{ fontSize:11, color:'var(--text-dimmer)', marginTop:6, lineHeight:1.4 }}>
+              Use the same email & password on each device to sync recipes and plans.
+            </div>
+          </div>
+        )}
+
         <div style={{ fontSize:13, color:'var(--text-dimmer)', marginBottom:6 }}>Claude API key</div>
         <div style={{ position:'relative' }}>
           <input
