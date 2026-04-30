@@ -655,9 +655,11 @@ onAuthStateChanged(auth, async (user) => {
 let lastAutoPull = 0;
 function maybeAutoPull() {
   if (!currentUser) return;
-  // Throttle to at most once every 3s — focus + visibilitychange can both fire
+  // Throttle to at most once per minute. Sync isn't time-critical and
+  // skipping rapid focus events (alt-tab, multitask switcher peek)
+  // saves Firestore reads. Manual ↻ refresh always works regardless.
   const now = Date.now();
-  if (now - lastAutoPull < 3000) return;
+  if (now - lastAutoPull < 60000) return;
   lastAutoPull = now;
   pullFromCloud(currentUser);
 }
@@ -2577,6 +2579,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
       <div className="screen-header">
         <div className="screen-title">Week</div>
         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <CloudRefreshButton />
           <span style={{ fontSize:20, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(-1)}>‹</span>
           <span style={{ fontSize:13, color:'#888', minWidth:90, textAlign:'center' }}>{weekRangeLabel(weekOffset)}</span>
           <span style={{ fontSize:20, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(1)}>›</span>
@@ -4781,16 +4784,13 @@ function AutoPlanScreen({
         <div style={{ fontSize:13, color:'var(--text-dimmer)' }}>Settings</div>
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
           <div className="screen-title">Auto-Plan</div>
-          <div style={{ display:'flex', alignItems:'center', gap:2 }}>
-            <CloudRefreshButton />
-            {onSettings && (
-              <span
-                onClick={onSettings}
-                title="Settings"
-                style={{ fontSize:20, color:'var(--text-dimmer)', cursor:'pointer', padding:'4px 8px' }}
-              >⚙</span>
-            )}
-          </div>
+          {onSettings && (
+            <span
+              onClick={onSettings}
+              title="Settings"
+              style={{ fontSize:20, color:'var(--text-dimmer)', cursor:'pointer', padding:'4px 8px' }}
+            >⚙</span>
+          )}
         </div>
       </div>
 
