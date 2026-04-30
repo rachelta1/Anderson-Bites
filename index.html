@@ -2308,7 +2308,7 @@ function dayHasContent(d) {
   return !!(d && d.meals && ((d.meals.b && d.meals.b.length) || d.meals.d || (d.meals.snacks && d.meals.snacks.length) || (d.tasks && d.tasks.length)));
 }
 
-function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, recipeDB, onMealClick }) {
+function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, recipeDB, onMealClick, onSettings }) {
   const [selected, setSelected] = useState(() => {
     const idx = weekData.findIndex(d => d.today);
     return idx >= 0 ? idx : 0;
@@ -2409,6 +2409,13 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
           <span style={{ fontSize:20, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(-1)}>‹</span>
           <span style={{ fontSize:13, color:'#888', minWidth:90, textAlign:'center' }}>{weekRangeLabel(weekOffset)}</span>
           <span style={{ fontSize:20, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(1)}>›</span>
+          {onSettings && (
+            <span
+              onClick={onSettings}
+              title="Settings"
+              style={{ fontSize:18, color:'var(--text-dimmer)', cursor:'pointer', padding:'0 4px', marginLeft:4 }}
+            >⚙</span>
+          )}
         </div>
       </div>
 
@@ -4661,6 +4668,7 @@ function App() {
   const [catCache, setCatCache] = usePersistedState('ab.catCache', {});
   const [persistedKey, setPersistedKey] = usePersistedState('ab.apiKey', '');
   const apiKey = EMBEDDED_API_KEY || persistedKey;
+  const [showSettings, setShowSettings] = useState(false);
 
   // Reset checked-off grocery items every Friday (local 00:00)
   useEffect(() => {
@@ -4776,6 +4784,7 @@ function App() {
           const r = recipeDB.find(x => x.name === name);
           if (r) handleRecipeDetail(r);
         }}
+        onSettings={() => setShowSettings(true)}
       />;
       case 1: return <GroceryScreen
         onTab={handleTab}
@@ -4814,6 +4823,13 @@ function App() {
   return (
     <Phone>
       {renderScreen()}
+      {showSettings && (
+        <SettingsSheet
+          apiKey={persistedKey}
+          setApiKey={setPersistedKey}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
     </Phone>
   );
 }
