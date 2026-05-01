@@ -4085,6 +4085,9 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const [notes, setNotes] = useState(r.notes || '');
   const [notesDirty, setNotesDirty] = useState(false);
   const [heroIdx, setHeroIdx] = useState(0);
+  // Toggle between the full Ingredients view (hero + meta + tags + ingredients)
+  // and a minimal Steps view (notes + steps only) for cooking.
+  const [activeTab, setActiveTab] = useState('ingredients');
   // Indices of ingredients the user has tapped to send to the grocery list.
   // Cleared after a successful add so the user can start a new selection.
   const [pickedIngs, setPickedIngs] = useState(() => new Set());
@@ -4157,145 +4160,224 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     setTimeout(() => setToast(''), 2000);
   };
 
+  // Segmented Ingredients/Steps toggle. Inlined as a variable so both
+  // branches of the layout can render the same component without duplication.
+  const tabToggle = (
+    <div style={{
+      display:'flex',
+      background:'#0e0e18',
+      border:'1.5px solid var(--border)',
+      borderRadius:10,
+      padding:3,
+      marginBottom:12,
+    }}>
+      {[
+        { k:'ingredients', label:'Ingredients' },
+        { k:'steps', label:'Steps' },
+      ].map(({ k, label }) => {
+        const on = activeTab === k;
+        return (
+          <div
+            key={k}
+            onClick={() => setActiveTab(k)}
+            style={{
+              flex:1, textAlign:'center',
+              padding:'10px 14px',
+              fontSize:16, fontWeight:600,
+              color: on ? 'var(--text)' : 'var(--text-dimmer)',
+              background: on ? 'var(--purple-mid)' : 'transparent',
+              borderRadius:7, cursor:'pointer',
+            }}
+          >{label}</div>
+        );
+      })}
+    </div>
+  );
+
+  // Notes block — shown on both tabs since notes apply to both contexts
+  // (e.g. swap notes are useful while shopping AND while cooking).
+  const notesBlock = (
+    <>
+      <div className="section-label" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+        <span>Notes</span>
+        {notesDirty && (
+          <span
+            onClick={saveNotes}
+            style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
+          >Save</span>
+        )}
+      </div>
+      <textarea
+        className="text-input"
+        value={notes}
+        onChange={e => { setNotes(e.target.value); setNotesDirty(true); }}
+        onBlur={saveNotes}
+        placeholder="Tweaks, swaps, who liked it…"
+        style={{ minHeight:60, lineHeight:1.5, fontSize:14, fontFamily:'var(--font)', marginBottom:14 }}
+      />
+    </>
+  );
+
   return (
     <div className="screen-body">
-      {/* Hero */}
-      <div className="hero-img" style={heroUrl ? { backgroundImage:`url(${heroUrl})`, backgroundSize:'cover', backgroundPosition:'center', backgroundColor:'#000' } : null}>
-        {heroUrl && (
-          <img src={heroUrl} alt="" onError={() => setHeroIdx(heroIdx + 1)} style={{ display:'none' }} />
-        )}
-        {!heroUrl && <span style={{ fontSize:64 }}>{fallbackEmoji(r)}</span>}
-        <div style={{ position:'absolute', top:8, left:8, display:'flex', gap:6 }}>
-          <span
-            onClick={onBack}
-            style={{ fontSize:13, color:'#ddd', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #444', borderRadius:6, cursor:'pointer' }}
-          >‹ back</span>
-        </div>
-        <div style={{ position:'absolute', top:8, right:8 }}>
-          <span
-            onClick={() => setConfirmDel(true)}
-            style={{ fontSize:13, color:'#e29090', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #5a2030', borderRadius:6, cursor:'pointer' }}
-            title="Delete recipe"
-          >🗑 delete</span>
-        </div>
-      </div>
-
-      <div style={{ flex:1, overflow:'hidden', padding:'10px 16px 0', display:'flex', flexDirection:'column' }}>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:6, gap:10 }}>
-          <div className="screen-title" style={{ fontSize:24, lineHeight:1.2 }}>{r.name}</div>
-          <span className="effort-badge" style={{ color: effortColor(r), flexShrink:0, marginTop:4 }}>{effortLabel(r)}</span>
-        </div>
-
-        <div style={{ display:'flex', gap:12, marginBottom:8, flexWrap:'wrap' }}>
-          <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>⏱ {r.time || `${r.estMinutes || ''} min`}</span>
-          <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>🍽️ {mealKind}</span>
-          {typeof r.servings === 'number' && (
-            <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>👥 {r.servings} servings</span>
-          )}
-          <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>used {r.used || 0}×</span>
-          {r.url && (
-            <a href={r.url} target="_blank" rel="noreferrer" style={{ fontSize:13, color:'var(--purple)', borderBottom:'1px dashed var(--purple-bg)', textDecoration:'none' }}>🔗 source</a>
-          )}
-        </div>
-
-        <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:6 }}>
-          {(r.tags || []).filter(t => t !== 'fast').map(t => <div key={t} className="recipe-tag">{t}</div>)}
-        </div>
-
-        <div className="divider" />
-
-        <div className="pane" style={{ padding:0, paddingTop:8 }}>
-          <div className="section-label" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            <span>Notes</span>
-            {notesDirty && (
-              <span
-                onClick={saveNotes}
-                style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
-              >Save</span>
+      {activeTab === 'ingredients' ? (
+        <>
+          {/* Hero */}
+          <div className="hero-img" style={heroUrl ? { backgroundImage:`url(${heroUrl})`, backgroundSize:'cover', backgroundPosition:'center', backgroundColor:'#000' } : null}>
+            {heroUrl && (
+              <img src={heroUrl} alt="" onError={() => setHeroIdx(heroIdx + 1)} style={{ display:'none' }} />
             )}
-          </div>
-          <textarea
-            className="text-input"
-            value={notes}
-            onChange={e => { setNotes(e.target.value); setNotesDirty(true); }}
-            onBlur={saveNotes}
-            placeholder="Tweaks, swaps, who liked it…"
-            style={{ minHeight:60, lineHeight:1.5, fontSize:14, fontFamily:'var(--font)', marginBottom:14 }}
-          />
-
-          <div className="section-label" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            <span>Ingredients</span>
-            {ingredients.length > 0 && setGroceryList && (
+            {!heroUrl && <span style={{ fontSize:64 }}>{fallbackEmoji(r)}</span>}
+            <div style={{ position:'absolute', top:8, left:8, display:'flex', gap:6 }}>
               <span
-                onClick={() => {
-                  if (pickedIngs.size === ingredients.length) setPickedIngs(new Set());
-                  else setPickedIngs(new Set(ingredients.map((_, i) => i)));
-                }}
-                style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
-              >{pickedIngs.size === ingredients.length ? 'Clear all' : 'Select all'}</span>
-            )}
+                onClick={onBack}
+                style={{ fontSize:13, color:'#ddd', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #444', borderRadius:6, cursor:'pointer' }}
+              >‹ back</span>
+            </div>
+            <div style={{ position:'absolute', top:8, right:8 }}>
+              <span
+                onClick={() => setConfirmDel(true)}
+                style={{ fontSize:13, color:'#e29090', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #5a2030', borderRadius:6, cursor:'pointer' }}
+                title="Delete recipe"
+              >🗑 delete</span>
+            </div>
           </div>
-          {ingredients.length === 0 && (
-            <div style={{ fontSize:13, color:'var(--text-dimmer)', padding:'6px 0' }}>No ingredients recorded.</div>
-          )}
-          {ingredients.map((ing, i) => {
-            const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
-            const parsed = raw ? parseItem(raw) : null;
-            const picked = pickedIngs.has(i);
-            const tappable = !!setGroceryList;
-            return (
-              <div
-                key={i}
-                onClick={tappable ? () => toggleIng(i) : null}
-                style={{
-                  display:'flex', gap:10, padding:'8px 6px',
-                  borderBottom:'1px dashed var(--border-dim)',
-                  fontSize:17,
-                  cursor: tappable ? 'pointer' : 'default',
-                  background: picked ? 'rgba(124,58,237,0.10)' : 'transparent',
-                  borderRadius: picked ? 6 : 0,
-                  alignItems:'center',
-                }}
-              >
-                {tappable ? (
-                  <span style={{
-                    width:18, height:18, flexShrink:0, borderRadius:4,
-                    border:`1.5px solid ${picked ? 'var(--purple)' : '#444'}`,
-                    background: picked ? 'var(--purple-mid)' : 'transparent',
-                    display:'flex', alignItems:'center', justifyContent:'center',
-                    color:'var(--purple-light)', fontSize:12, fontWeight:700,
-                  }}>{picked ? '✓' : ''}</span>
-                ) : (
-                  <span style={{ color:'var(--purple-bg)', minWidth:18 }}>•</span>
-                )}
-                {parsed && parsed.q ? (
-                  <>
-                    <span style={{ color:'var(--purple-light)', minWidth:60, fontSize:13 }}>{parsed.q}</span>
-                    <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
-                  </>
-                ) : (
-                  <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
+
+          <div style={{ flex:1, overflow:'hidden', padding:'10px 16px 0', display:'flex', flexDirection:'column' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:6, gap:10 }}>
+              <div className="screen-title" style={{ fontSize:24, lineHeight:1.2 }}>{r.name}</div>
+              <span className="effort-badge" style={{ color: effortColor(r), flexShrink:0, marginTop:4 }}>{effortLabel(r)}</span>
+            </div>
+
+            <div style={{ display:'flex', gap:12, marginBottom:8, flexWrap:'wrap' }}>
+              <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>⏱ {r.time || `${r.estMinutes || ''} min`}</span>
+              <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>🍽️ {mealKind}</span>
+              {typeof r.servings === 'number' && (
+                <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>👥 {r.servings} servings</span>
+              )}
+              <span style={{ fontSize:15, color:'var(--text-dimmer)' }}>used {r.used || 0}×</span>
+              {r.url && (
+                <a href={r.url} target="_blank" rel="noreferrer" style={{ fontSize:13, color:'var(--purple)', borderBottom:'1px dashed var(--purple-bg)', textDecoration:'none' }}>🔗 source</a>
+              )}
+            </div>
+
+            <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:6 }}>
+              {(r.tags || []).filter(t => t !== 'fast').map(t => <div key={t} className="recipe-tag">{t}</div>)}
+            </div>
+
+            <div className="divider" />
+
+            <div className="pane" style={{ padding:0, paddingTop:8 }}>
+              {tabToggle}
+              {notesBlock}
+
+              <div className="section-label" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <span>Ingredients</span>
+                {ingredients.length > 0 && setGroceryList && (
+                  <span
+                    onClick={() => {
+                      if (pickedIngs.size === ingredients.length) setPickedIngs(new Set());
+                      else setPickedIngs(new Set(ingredients.map((_, i) => i)));
+                    }}
+                    style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
+                  >{pickedIngs.size === ingredients.length ? 'Clear all' : 'Select all'}</span>
                 )}
               </div>
-            );
-          })}
+              {ingredients.length === 0 && (
+                <div style={{ fontSize:13, color:'var(--text-dimmer)', padding:'6px 0' }}>No ingredients recorded.</div>
+              )}
+              {ingredients.map((ing, i) => {
+                const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
+                const parsed = raw ? parseItem(raw) : null;
+                const picked = pickedIngs.has(i);
+                const tappable = !!setGroceryList;
+                return (
+                  <div
+                    key={i}
+                    onClick={tappable ? () => toggleIng(i) : null}
+                    style={{
+                      display:'flex', gap:10, padding:'8px 6px',
+                      borderBottom:'1px dashed var(--border-dim)',
+                      fontSize:17,
+                      cursor: tappable ? 'pointer' : 'default',
+                      background: picked ? 'rgba(124,58,237,0.10)' : 'transparent',
+                      borderRadius: picked ? 6 : 0,
+                      alignItems:'center',
+                    }}
+                  >
+                    {tappable ? (
+                      <span style={{
+                        width:18, height:18, flexShrink:0, borderRadius:4,
+                        border:`1.5px solid ${picked ? 'var(--purple)' : '#444'}`,
+                        background: picked ? 'var(--purple-mid)' : 'transparent',
+                        display:'flex', alignItems:'center', justifyContent:'center',
+                        color:'var(--purple-light)', fontSize:12, fontWeight:700,
+                      }}>{picked ? '✓' : ''}</span>
+                    ) : (
+                      <span style={{ color:'var(--purple-bg)', minWidth:18 }}>•</span>
+                    )}
+                    {parsed && parsed.q ? (
+                      <>
+                        <span style={{ color:'var(--purple-light)', minWidth:60, fontSize:13 }}>{parsed.q}</span>
+                        <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
+                      </>
+                    ) : (
+                      <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
+                    )}
+                  </div>
+                );
+              })}
 
-          <div className="section-label" style={{ marginTop:10 }}>Instructions</div>
-          {steps.length === 0 && (
-            <div style={{ fontSize:13, color:'var(--text-dimmer)', padding:'6px 0' }}>
-              {r.url ? 'See source link for full instructions.' : 'No steps recorded.'}
+              <div style={{ height:12 }} />
             </div>
-          )}
-          {steps.map((s, i) => (
-            <div key={i} style={{ display:'flex', gap:8, padding:'4px 0', fontSize:16, color:'var(--text-dimmer)', lineHeight:1.6 }}>
-              <span style={{ color:'var(--purple-bg)', minWidth:20 }}>{i+1}.</span>
-              <span style={{ flex:1 }}>{s}</span>
-            </div>
-          ))}
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Slim header for Steps view — no hero, meta, or tags. Just the
+              essentials for cooking: back, title, delete. Notes + steps below. */}
+          <div style={{
+            padding:'14px 14px 10px',
+            display:'flex', alignItems:'center', gap:8,
+            borderBottom:'1px solid var(--border-dim)',
+            background:'#0a0a14',
+          }}>
+            <span
+              onClick={onBack}
+              style={{ fontSize:28, color:'var(--text-dimmer)', cursor:'pointer', padding:'0 6px', lineHeight:1 }}
+              title="Back"
+            >‹</span>
+            <div className="screen-title" style={{ flex:1, fontSize:22, lineHeight:1.2, margin:0 }}>{r.name}</div>
+            <span
+              onClick={() => setConfirmDel(true)}
+              style={{ fontSize:18, color:'#a05a6a', cursor:'pointer', padding:'4px 8px' }}
+              title="Delete recipe"
+            >🗑</span>
+          </div>
 
-          <div style={{ height:12 }} />
-        </div>
-      </div>
+          <div style={{ flex:1, overflow:'hidden', padding:'12px 16px 0', display:'flex', flexDirection:'column' }}>
+            <div className="pane" style={{ padding:0 }}>
+              {tabToggle}
+              {notesBlock}
+
+              <div className="section-label">Instructions</div>
+              {steps.length === 0 && (
+                <div style={{ fontSize:14, color:'var(--text-dimmer)', padding:'6px 0' }}>
+                  {r.url ? 'See source link for full instructions.' : 'No steps recorded.'}
+                </div>
+              )}
+              {steps.map((s, i) => (
+                <div key={i} style={{ display:'flex', gap:10, padding:'8px 0', fontSize:17, color:'var(--text)', lineHeight:1.65 }}>
+                  <span style={{ color:'var(--purple-light)', minWidth:24, fontWeight:600 }}>{i+1}.</span>
+                  <span style={{ flex:1 }}>{s}</span>
+                </div>
+              ))}
+
+              <div style={{ height:12 }} />
+            </div>
+          </div>
+        </>
+      )}
 
       <div className="btn-wrap">
         {toast && (
