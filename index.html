@@ -4053,7 +4053,7 @@ function AddToCalendarSheet({ recipe, weekMap, setWeekMap, onClose, onDone }) {
 /* ═══════════════════════════════════════════
    SCREEN: RECIPE DETAIL
 ═══════════════════════════════════════════ */
-function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB }) {
+function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB, groceryList, setGroceryList }) {
   const r = recipe || (recipeDB && recipeDB[0]) || {};
   const [showCal, setShowCal] = useState(false);
   const [toast, setToast] = useState('');
@@ -4061,11 +4061,59 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const [notes, setNotes] = useState(r.notes || '');
   const [notesDirty, setNotesDirty] = useState(false);
   const [heroIdx, setHeroIdx] = useState(0);
+  // Indices of ingredients the user has tapped to send to the grocery list.
+  // Cleared after a successful add so the user can start a new selection.
+  const [pickedIngs, setPickedIngs] = useState(() => new Set());
   const heroSources = recipePhotoSources(r, 800, 400);
   const heroUrl = heroIdx < heroSources.length ? heroSources[heroIdx] : null;
 
   const ingredients = Array.isArray(r.ingredients) ? r.ingredients : [];
   const steps = Array.isArray(r.steps) ? r.steps : [];
+
+  const toggleIng = (i) => {
+    setPickedIngs(prev => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  };
+
+  // Push selected ingredients into the grocery list. Merges into existing
+  // items by case-insensitive name (combines qty strings + sources). Marks
+  // src as the recipe name so future overwrite-strippers can attribute it.
+  const addPickedToGrocery = () => {
+    if (!setGroceryList || pickedIngs.size === 0) return;
+    const picks = [...pickedIngs].sort((a, b) => a - b).map(i => {
+      const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
+      const parsed = raw ? parseItem(raw) : { q: '', n: ingredients[i] };
+      return { q: parsed.q || '', n: parsed.n || ingredients[i] };
+    }).filter(p => p.n && p.n.trim());
+    setGroceryList(prev => {
+      const next = [...prev];
+      const indexByName = {};
+      next.forEach((it, idx) => { indexByName[(it.n || '').toLowerCase()] = idx; });
+      picks.forEach(p => {
+        const key = p.n.toLowerCase();
+        if (indexByName[key] != null) {
+          const idx = indexByName[key];
+          const it = next[idx];
+          const qSet = new Set((it.q || '').split(' + ').map(s => s.trim()).filter(Boolean));
+          if (p.q) qSet.add(p.q);
+          const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
+          sSet.add(r.name || 'Recipe');
+          next[idx] = { ...it, q: [...qSet].join(' + '), src: [...sSet].join(' + '), done: false };
+        } else {
+          next.push({ q: p.q, n: p.n, done: false, src: r.name || 'Recipe' });
+          indexByName[key] = next.length - 1;
+        }
+      });
+      return next;
+    });
+    const n = pickedIngs.size;
+    setPickedIngs(new Set());
+    setToast(`Added ${n} to grocery list`);
+    setTimeout(() => setToast(''), 2500);
+  };
   const mealKind = (r.tags || []).includes('breakfast') ? 'breakfast'
                  : (r.tags || []).includes('dessert') ? 'dessert'
                  : (r.tags || []).includes('soup') ? 'soup'
@@ -4151,23 +4199,58 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
             style={{ minHeight:60, lineHeight:1.5, fontSize:14, fontFamily:'var(--font)', marginBottom:14 }}
           />
 
-          <div className="section-label">Ingredients</div>
+          <div className="section-label" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <span>Ingredients</span>
+            {ingredients.length > 0 && setGroceryList && (
+              <span
+                onClick={() => {
+                  if (pickedIngs.size === ingredients.length) setPickedIngs(new Set());
+                  else setPickedIngs(new Set(ingredients.map((_, i) => i)));
+                }}
+                style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
+              >{pickedIngs.size === ingredients.length ? 'Clear all' : 'Select all'}</span>
+            )}
+          </div>
           {ingredients.length === 0 && (
             <div style={{ fontSize:13, color:'var(--text-dimmer)', padding:'6px 0' }}>No ingredients recorded.</div>
           )}
           {ingredients.map((ing, i) => {
             const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
             const parsed = raw ? parseItem(raw) : null;
+            const picked = pickedIngs.has(i);
+            const tappable = !!setGroceryList;
             return (
-              <div key={i} style={{ display:'flex', gap:10, padding:'5px 0', borderBottom:'1px dashed var(--border-dim)', fontSize:17 }}>
-                <span style={{ color:'var(--purple-bg)', minWidth:18 }}>•</span>
+              <div
+                key={i}
+                onClick={tappable ? () => toggleIng(i) : null}
+                style={{
+                  display:'flex', gap:10, padding:'8px 6px',
+                  borderBottom:'1px dashed var(--border-dim)',
+                  fontSize:17,
+                  cursor: tappable ? 'pointer' : 'default',
+                  background: picked ? 'rgba(124,58,237,0.10)' : 'transparent',
+                  borderRadius: picked ? 6 : 0,
+                  alignItems:'center',
+                }}
+              >
+                {tappable ? (
+                  <span style={{
+                    width:18, height:18, flexShrink:0, borderRadius:4,
+                    border:`1.5px solid ${picked ? 'var(--purple)' : '#444'}`,
+                    background: picked ? 'var(--purple-mid)' : 'transparent',
+                    display:'flex', alignItems:'center', justifyContent:'center',
+                    color:'var(--purple-light)', fontSize:12, fontWeight:700,
+                  }}>{picked ? '✓' : ''}</span>
+                ) : (
+                  <span style={{ color:'var(--purple-bg)', minWidth:18 }}>•</span>
+                )}
                 {parsed && parsed.q ? (
                   <>
                     <span style={{ color:'var(--purple-light)', minWidth:60, fontSize:13 }}>{parsed.q}</span>
                     <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
                   </>
                 ) : (
-                  <span style={{ color:'#bbb' }}>{ing}</span>
+                  <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
                 )}
               </div>
             );
@@ -4194,7 +4277,20 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
         {toast && (
           <div style={{ textAlign:'center', fontSize:13, color:'var(--purple-light)', marginBottom:8 }}>✓ {toast}</div>
         )}
-        <div className="gen-btn" onClick={() => setShowCal(true)}>+ Add to Calendar</div>
+        {pickedIngs.size > 0 ? (
+          <div style={{ display:'flex', gap:8 }}>
+            <div
+              className="gen-btn"
+              onClick={() => setPickedIngs(new Set())}
+              style={{ flex:'0 0 auto', padding:'13px 18px', background:'#202030', color:'var(--text)', border:'1.5px solid var(--border)' }}
+            >Cancel</div>
+            <div className="gen-btn" onClick={addPickedToGrocery} style={{ flex:1 }}>
+              🛒 Add {pickedIngs.size} to Grocery
+            </div>
+          </div>
+        ) : (
+          <div className="gen-btn" onClick={() => setShowCal(true)}>+ Add to Calendar</div>
+        )}
       </div>
 
       {showCal && (
@@ -5120,6 +5216,8 @@ function App() {
         setWeekMap={setWeekMap}
         recipeDB={recipeDB}
         setRecipeDB={setRecipeDB}
+        groceryList={groceryList}
+        setGroceryList={setGroceryList}
       />;
     }
     if (subscreen === 'add-recipe') {
