@@ -195,18 +195,18 @@ body {
 
 /* ── Meal Slot ── */
 .meal-slot {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 12px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 14px;
   background: #16161f;
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid #222;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .meal-slot.dashed { border-style: dashed; border-color: #222; }
 .meal-slot.ghost { border-color: var(--border-dim); }
-.meal-slot-icon { font-size: 22px; opacity: 0.6; }
-.meal-slot-name { font-size: 19px; color: #ddd; }
-.meal-slot-meta { font-size: 15px; color: var(--text-dimmer); }
+.meal-slot-icon { font-size: 26px; opacity: 0.6; }
+.meal-slot-name { font-size: 21px; color: #ddd; }
+.meal-slot-meta { font-size: 16px; color: var(--text-dimmer); }
 .meal-slot-edit { font-size: 15px; color: #444; margin-left: auto; }
 .meal-slot-del {
   font-size: 22px; line-height: 1;
@@ -282,9 +282,9 @@ body {
 
 /* ── Day chip (week strip) ── */
 .day-chip {
-  flex: 1; height: 60px; border-radius: 10px;
+  flex: 1; height: 76px; border-radius: 12px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 2px; cursor: pointer; font-family: var(--font);
+  gap: 3px; cursor: pointer; font-family: var(--font);
 }
 
 /* ── Hatch placeholder ── */
@@ -351,8 +351,8 @@ body {
 /* ── Search bar ── */
 .search-bar {
   margin: 0 16px 10px;
-  height: 38px; background: var(--card); border: 1.5px solid var(--border-dim);
-  border-radius: 10px; display: flex; align-items: center; padding: 0 12px; gap: 8px;
+  height: 48px; background: var(--card); border: 1.5px solid var(--border-dim);
+  border-radius: 10px; display: flex; align-items: center; padding: 0 14px; gap: 10px;
 }
 
 /* ── Add option card ── */
@@ -2639,9 +2639,9 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
           <CloudRefreshButton />
         </div>
         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-          <span style={{ fontSize:24, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(-1)}>‹</span>
-          <span style={{ fontSize:15, color:'#888', minWidth:100, textAlign:'center' }}>{weekRangeLabel(weekOffset)}</span>
-          <span style={{ fontSize:24, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(1)}>›</span>
+          <span style={{ fontSize:28, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(-1)}>‹</span>
+          <span style={{ fontSize:18, color:'#888', minWidth:120, textAlign:'center' }}>{weekRangeLabel(weekOffset)}</span>
+          <span style={{ fontSize:28, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(1)}>›</span>
         </div>
       </div>
 
@@ -2659,8 +2659,8 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
                 border: `1.5px solid ${i === selected ? 'var(--purple)' : d.today ? '#3b1f70' : 'var(--border)'}`,
               }}
             >
-              <span style={{ fontSize:12, color: i===selected ? 'var(--purple-light)' : d.today ? '#6d44b0' : 'var(--text-dim)' }}>{d.d}</span>
-              <span style={{ fontSize:18, color: i===selected ? 'var(--text)' : d.today ? '#ccc' : '#888' }}>{d.n}</span>
+              <span style={{ fontSize:14, color: i===selected ? 'var(--purple-light)' : d.today ? '#6d44b0' : 'var(--text-dim)' }}>{d.d}</span>
+              <span style={{ fontSize:22, fontWeight:600, color: i===selected ? 'var(--text)' : d.today ? '#ccc' : '#888' }}>{d.n}</span>
               {hasContent && (
                 <span style={{ width:4, height:4, borderRadius:'50%', background: i===selected ? 'var(--purple-light)' : 'var(--purple)', display:'block' }} />
               )}
@@ -3297,12 +3297,12 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       {/* Toolbar */}
       <div style={{ display:'flex', gap:8, padding:'0 16px 10px', alignItems:'center' }}>
         <div style={{
-          flex:1, height:34, display:'flex', alignItems:'center',
+          flex:1, height:48, display:'flex', alignItems:'center',
           background:'#0f0f18',
           border:`1.5px ${newItemText ? 'solid' : 'dashed'} ${newItemText ? 'var(--purple)' : 'var(--border)'}`,
-          borderRadius:8, padding:'0 8px 0 12px', gap:6,
+          borderRadius:10, padding:'0 10px 0 14px', gap:8,
         }}>
-          <span style={{ fontSize:16, color:'var(--text-dimmer)' }}>+</span>
+          <span style={{ fontSize:22, color:'var(--text-dimmer)' }}>+</span>
           <input
             value={newItemText}
             onChange={e => setNewItemText(e.target.value)}
@@ -3310,22 +3310,22 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
             placeholder="add item (e.g. 2 lbs ground beef)"
             style={{
               flex:1, background:'transparent', border:'none', outline:'none',
-              color:'var(--text)', fontFamily:'var(--font)', fontSize:15,
+              color:'var(--text)', fontFamily:'var(--font)', fontSize:18,
             }}
           />
           {newItemText && (
             <span
               onClick={addItem}
-              style={{ fontSize:13, fontWeight:700, color:'var(--purple-light)', cursor:'pointer', padding:'0 4px' }}
+              style={{ fontSize:16, fontWeight:700, color:'var(--purple-light)', cursor:'pointer', padding:'0 6px' }}
             >add</span>
           )}
         </div>
         <div
           onClick={() => setShowDone(!showDone)}
           style={{
-            height:34, padding:'0 10px', borderRadius:8,
-            display:'flex', alignItems:'center', gap:5,
-            fontSize:13, cursor:'pointer',
+            height:48, padding:'0 12px', borderRadius:10,
+            display:'flex', alignItems:'center', gap:6,
+            fontSize:15, cursor:'pointer',
             background: showDone ? 'var(--purple-mid)' : '#131320',
             border: `1.5px ${showDone ? 'solid' : 'dashed'} ${showDone ? 'var(--purple)' : 'var(--border)'}`,
             color: showDone ? 'var(--purple-light)' : '#444',
@@ -3617,7 +3617,7 @@ function RecipesScreen({ onTab, onRecipeDetail, onAddRecipe, recipeDB }) {
       </div>
 
       <div className="search-bar">
-        <span style={{ fontSize:16, color:'#666' }}>🔍</span>
+        <span style={{ fontSize:20, color:'#666' }}>🔍</span>
         <input
           type="text"
           value={query}
@@ -3626,7 +3626,7 @@ function RecipesScreen({ onTab, onRecipeDetail, onAddRecipe, recipeDB }) {
           style={{ flex:1, background:'transparent', border:'none', outline:'none', color:'var(--text)', fontSize:18, fontFamily:'var(--font)' }}
         />
         {query && (
-          <span onClick={() => setQuery('')} style={{ fontSize:16, color:'#666', cursor:'pointer' }}>×</span>
+          <span onClick={() => setQuery('')} style={{ fontSize:20, color:'#666', cursor:'pointer' }}>×</span>
         )}
       </div>
 
@@ -3643,13 +3643,12 @@ function RecipesScreen({ onTab, onRecipeDetail, onAddRecipe, recipeDB }) {
 
       {/* Effort filter row — also scrollable with arrows for symmetry */}
       <HScroll style={{ padding:'0 16px 10px' }}>
-        <span style={{ fontSize:12, color:'var(--text-dimmer)', alignSelf:'center', flexShrink:0 }}>Effort:</span>
+        <span style={{ fontSize:14, color:'var(--text-dimmer)', alignSelf:'center', flexShrink:0 }}>Effort:</span>
         {[['any','any'],['low','low'],['med','med'],['high','high']].map(([key,label]) => (
           <div
             key={key}
             className={`pill ${effortFilter === key ? 'pill-on' : 'pill-off'}`}
             onClick={() => setEffortFilter(key)}
-            style={{ fontSize:12, padding:'2px 10px' }}
           >{label}</div>
         ))}
       </HScroll>
