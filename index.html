@@ -3203,6 +3203,7 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
   const [showDone, setShowDone] = useState(false);
   const [newItemText, setNewItemText] = useState('');
   const [showPantry, setShowPantry] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   // LLM is the source of truth for category AND for the "should this even be on
   // the grocery list?" decision (isStaple). The cache (catCache) holds Claude's
@@ -3333,6 +3334,19 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
         >
           ✓ done ({doneCount})
         </div>
+        {totalCount > 0 && (
+          <div
+            onClick={() => setConfirmClear(true)}
+            title="Clear entire list"
+            style={{
+              height:48, width:48, borderRadius:10,
+              display:'flex', alignItems:'center', justifyContent:'center',
+              fontSize:18, cursor:'pointer',
+              background:'#131320', border:'1.5px dashed var(--border)',
+              color:'#666',
+            }}
+          >🗑</div>
+        )}
       </div>
 
       {/* Items */}
@@ -3387,6 +3401,16 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
           staples={pantryStaples}
           setStaples={setPantryStaples}
           onClose={() => setShowPantry(false)}
+        />
+      )}
+
+      {confirmClear && (
+        <ConfirmSheet
+          title="Clear grocery list?"
+          body={`This removes all ${totalCount} item${totalCount === 1 ? '' : 's'} — including manually added ones. This can't be undone.`}
+          confirmLabel="Clear all"
+          onConfirm={() => { setItems([]); setConfirmClear(false); }}
+          onClose={() => setConfirmClear(false)}
         />
       )}
     </div>
@@ -4649,6 +4673,42 @@ function AutoPlanScreen({
     } else {
       nextList = [...groceryList];
     }
+    // 3b. Stale cleanup — runs in BOTH overwrite and append. Strips any source
+    //     segment whose date-part (e.g. "Apr 14") parses to a day before today,
+    //     so groceries from previous weeks' auto-plans don't accumulate. Items
+    //     with src "Added manually" or src that doesn't contain a parseable
+    //     "Mon DD" date (recipe-name sources, legacy items) are left alone.
+    //     Items left with an empty src after stripping are dropped.
+    const _today = new Date();
+    _today.setHours(0, 0, 0, 0);
+    const _MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const isStaleSrcSegment = (segment) => {
+      const datePart = (segment || '').split(' · ')[0].trim();
+      const m = datePart.match(/(?:^|\s)([A-Z][a-z]{2})\s+(\d{1,2})(?:\s|$)/);
+      if (!m) return false;
+      const monthIdx = _MONTHS_SHORT.indexOf(m[1]);
+      if (monthIdx < 0) return false;
+      const day = parseInt(m[2], 10);
+      // Year inference: assume current year. If that lands more than 180 days
+      // in the future, treat as last year (Dec→Jan boundary, etc.).
+      let candidate = new Date(_today.getFullYear(), monthIdx, day);
+      if (candidate.getTime() - _today.getTime() > 180 * 24 * 3600 * 1000) {
+        candidate = new Date(_today.getFullYear() - 1, monthIdx, day);
+      }
+      return candidate.getTime() < _today.getTime();
+    };
+    nextList = nextList
+      .map(it => {
+        const srcs = (it.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
+        if (!srcs.length) return it; // no parseable sources to begin with → leave alone
+        const keptSrcs = srcs.filter(s => !isStaleSrcSegment(s));
+        if (keptSrcs.length === srcs.length) return it; // nothing stale
+        if (keptSrcs.length === 0) return null; // every source was stale → orphan, drop
+        // Mixed: some sources past, some present/future. Keep but clear q since
+        // we can't disentangle which qty came from which source.
+        return { ...it, src: keptSrcs.join(' + '), q: '' };
+      })
+      .filter(it => it !== null);
     const indexByName = {};
     nextList.forEach((it, i) => { indexByName[it.n.toLowerCase()] = i; });
     let added = 0, merged = 0;
