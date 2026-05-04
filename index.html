@@ -707,6 +707,23 @@ async function pullFromCloud(user, opts = {}) {
       initialPullDone = true;
       return;
     }
+    // SANITY CHECK: if cloud snapshot is dramatically smaller than what's
+    // currently on this device, the cloud is probably corrupted (e.g. by
+    // the prior race condition that uploaded empty defaults). Refuse to
+    // overwrite local with the suspect cloud — push local up instead to
+    // recover the cloud doc. Skip this check when the user explicitly
+    // forced a pull (force=true), since they may genuinely want to discard
+    // local in favor of cloud.
+    const cloudData = cloud.data || {};
+    const cloudBytes = Object.values(cloudData).reduce((acc, v) => acc + ((v || '').length || 0), 0);
+    const localBytes = Object.values(snapshotLocal()).reduce((acc, v) => acc + ((v || '').length || 0), 0);
+    if (!force && localBytes > 5000 && cloudBytes < localBytes * 0.5) {
+      console.warn('[AB sync] cloud appears corrupted (cloudBytes=' + cloudBytes + ', localBytes=' + localBytes + '), pushing local instead of pulling');
+      pulling = false;
+      await pushNow({ internal: true });
+      initialPullDone = true;
+      return;
+    }
     // Wipe local ab.* keys then write cloud values, then reload so React
     // re-reads its initial state from the freshly-populated localStorage.
     const keysToRemove = [];
@@ -787,6 +804,25 @@ window.AB_FB = {
   },
   syncNow: () => pushNow(),
   pullNow: () => currentUser ? pullFromCloud(currentUser, { force: true }) : Promise.resolve(),
+  // Emergency recovery: forcibly push local snapshot to cloud, bypassing
+  // the initialPullDone gate. Use this when cloud is known-corrupted and
+  // local has the right data. Returns the number of keys pushed (or null
+  // if no user).
+  forcePush: async () => {
+    if (!currentUser) return null;
+    const keyCount = Object.keys(snapshotLocal()).length;
+    await pushNow({ internal: true });
+    return keyCount;
+  },
+  // Diagnostic: returns sync state for the UI to display.
+  status: () => ({
+    user: currentUser ? currentUser.email : null,
+    initialPullDone,
+    pulling,
+    localKeys: Object.keys(snapshotLocal()).length,
+    localBytes: Object.values(snapshotLocal()).reduce((acc, v) => acc + ((v || '').length || 0), 0),
+    lastSync: parseInt(localStorage.getItem('ab.lastSync') || '0', 10),
+  }),
 };
 </script>
 
@@ -3502,6 +3538,78 @@ function CloudRefreshButton() {
 /* ═══════════════════════════════════════════
    SCREEN: RECIPES
 ═══════════════════════════════════════════ */
+// Emergency recovery UI: lets the user force-push their local data to
+// cloud when they suspect cloud was corrupted. Two-step (Recover → Confirm)
+// to prevent fat-finger pushes that overwrite a genuinely good cloud doc.
+function SyncRecoveryButton({ onMsg }) {
+  const [stage, setStage] = useState('idle'); // 'idle' | 'confirm' | 'busy'
+  const [info, setInfo] = useState(null);
+
+  const showInfo = () => {
+    if (!window.AB_FB || !window.AB_FB.status) return;
+    setInfo(window.AB_FB.status());
+    setStage('confirm');
+  };
+  const doForce = async () => {
+    setStage('busy');
+    try {
+      const n = await window.AB_FB.forcePush();
+      onMsg && onMsg(n != null ? `Pushed ${n} keys to cloud` : 'Not signed in');
+      setStage('idle');
+      setInfo(null);
+    } catch (e) {
+      onMsg && onMsg('Push failed: ' + (e.message || e));
+      setStage('idle');
+    }
+  };
+
+  if (stage === 'idle') {
+    return (
+      <div
+        onClick={showInfo}
+        style={{
+          display:'inline-block', padding:'6px 14px', marginRight:8, marginBottom:8,
+          fontSize:13, color:'var(--purple-light)',
+          border:'1px solid var(--purple-bg)', borderRadius:6,
+          cursor:'pointer',
+        }}
+        title="If cloud got wiped, push this device's data back up"
+      >↑ Recover cloud from this device</div>
+    );
+  }
+  if (stage === 'confirm') {
+    return (
+      <div style={{
+        marginBottom:10, padding:10, borderRadius:8,
+        background:'#1f1530', border:'1px solid var(--purple-bg)',
+        fontSize:12, color:'var(--text)', lineHeight:1.5,
+      }}>
+        <div style={{ fontWeight:600, marginBottom:6 }}>Overwrite cloud with this device?</div>
+        <div style={{ color:'var(--text-dimmer)', marginBottom:8 }}>
+          This device has <b style={{ color:'var(--text)' }}>{info ? info.localKeys : '?'}</b> keys
+          (~{info ? Math.round(info.localBytes/1024) : '?'} KB). Cloud will be replaced. Other
+          devices will pull this version on their next refresh.
+        </div>
+        <div style={{ display:'flex', gap:6 }}>
+          <div
+            onClick={() => { setStage('idle'); setInfo(null); }}
+            style={{ flex:1, textAlign:'center', padding:'6px 10px', fontSize:13, color:'var(--text)', background:'#202030', border:'1px solid var(--border)', borderRadius:6, cursor:'pointer' }}
+          >Cancel</div>
+          <div
+            onClick={doForce}
+            style={{ flex:1, textAlign:'center', padding:'6px 10px', fontSize:13, color:'#fff', background:'var(--purple)', borderRadius:6, cursor:'pointer' }}
+          >Push</div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display:'inline-block', padding:'6px 14px', marginRight:8, marginBottom:8, fontSize:13, color:'var(--text-dimmer)' }}>
+      Pushing…
+    </div>
+  );
+}
+
 function SettingsSheet({ apiKey, setApiKey, onClose }) {
   const [val, setVal] = useState(apiKey || '');
   const [reveal, setReveal] = useState(false);
@@ -3566,6 +3674,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
           <div style={{ marginBottom:14 }}>
             <div style={{ fontSize:14, color:'var(--text)', marginBottom:4 }}>Signed in as {user.email}</div>
             <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:8, lineHeight:1.5 }}>Recipes, plans, and lists sync across devices automatically.</div>
+            <SyncRecoveryButton onMsg={setAuthMsg} />
             <div className="danger-btn" style={{ display:'inline-block', padding:'6px 14px' }} onClick={busy ? null : doSignOut}>
               {busy ? '…' : 'Sign out'}
             </div>
