@@ -5155,16 +5155,16 @@ function AutoPlanScreen({
                 key={dt}
                 onClick={() => toggleDay(dt)}
                 style={{
-                  flex:'1 1 calc(25% - 4px)', minWidth:60, height:48, borderRadius:8, marginBottom:4,
-                  display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:1,
+                  flex:'1 1 calc(25% - 4px)', minWidth:60, height:52, borderRadius:8, marginBottom:4,
+                  display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:2,
                   fontFamily:'var(--font)', cursor:'pointer',
                   background: on ? 'var(--purple-mid)' : '#131320',
                   border: `1.5px ${on ? 'solid' : 'dashed'} ${on ? 'var(--purple)' : '#252535'}`,
-                  color: on ? 'var(--purple-light)' : '#333',
+                  color: on ? 'var(--purple-light)' : '#888',
                 }}
               >
-                <span style={{ fontSize:15 }}>{d}</span>
-                <span style={{ fontSize:13, opacity:0.7 }}>{dt}</span>
+                <span style={{ fontSize:15, fontWeight:700 }}>{d}</span>
+                <span style={{ fontSize:14, fontWeight:600 }}>{dt}</span>
               </div>
             ))}
           </div>
