@@ -618,6 +618,13 @@ const origRemoveItem = localStorage.removeItem.bind(localStorage);
 let currentUser = null;
 let pulling = false;     // suppress push during pull
 let pushTimer = null;
+// CRITICAL: blocks all pushes until the FIRST pullFromCloud resolves.
+// Without this, React's mount-time useEffects (which write current state
+// back to localStorage) trigger a debounced push that races the pull's
+// getDoc(). On slow networks, or after iOS wipes PWA localStorage
+// (~7 days idle / storage pressure), this push wins and uploads empty
+// defaults to Firestore — wiping the user's real data.
+let initialPullDone = false;
 
 function snapshotLocal() {
   const out = {};
@@ -628,8 +635,16 @@ function snapshotLocal() {
   return out;
 }
 
-async function pushNow() {
-  if (!currentUser || pulling) return;
+async function pushNow(opts = {}) {
+  const { internal = false } = opts;
+  if (!currentUser) return;
+  // Block normal pushes until the initial pull has resolved. The
+  // `internal` escape hatch is used only by pullFromCloud's
+  // seed-from-local branch, which runs after pulling=false.
+  if (!internal && (pulling || !initialPullDone)) {
+    console.log('[AB sync] push suppressed (pulling=' + pulling + ', initialPullDone=' + initialPullDone + ')');
+    return;
+  }
   try {
     const ts = Date.now();
     const data = snapshotLocal();
@@ -646,7 +661,7 @@ async function pushNow() {
 }
 
 function schedulePush() {
-  if (!currentUser || pulling) return;
+  if (!currentUser || pulling || !initialPullDone) return;
   if (pushTimer) clearTimeout(pushTimer);
   pushTimer = setTimeout(() => { pushTimer = null; pushNow(); }, 2000);
 }
@@ -662,22 +677,36 @@ localStorage.removeItem = function(k) {
 
 async function pullFromCloud(user, opts = {}) {
   const { force = false } = opts;
+  // CRITICAL: set `pulling = true` BEFORE the await. Any localStorage
+  // writes that fire while we're awaiting getDoc (e.g. React mount-time
+  // useEffects) will be suppressed by schedulePush/pushNow.
+  pulling = true;
+  // Cancel any push timer that schedulePush may have queued before
+  // currentUser was set (or before we got here). Belt-and-suspenders —
+  // pulling=true already blocks pushNow, but killing the timer means
+  // we don't have a stale push fire as soon as pulling drops.
+  if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
   try {
     const snap = await getDoc(doc(db, 'households', user.uid));
     if (!snap.exists()) {
       // First time on this account — push local state up to seed the cloud doc.
       console.log('[AB sync] no cloud doc yet, seeding from local');
-      await pushNow();
+      pulling = false;
+      // Use internal:true to bypass the initialPullDone gate (we're
+      // mid-pull, the gate is exactly what's keeping pushes blocked).
+      await pushNow({ internal: true });
+      initialPullDone = true;
       return;
     }
     const cloud = snap.data();
     const cloudUpdated = cloud.clientUpdatedAt || 0;
     const lastSync = parseInt(localStorage.getItem('ab.lastSync') || '0', 10);
     if (!force && cloudUpdated <= lastSync) {
-      console.log('[AB sync] cloud not newer than last sync, skip pull');
+      console.log('[AB sync] cloud not newer than last sync, skip pull (cloud=' + cloudUpdated + ', lastSync=' + lastSync + ')');
+      pulling = false;
+      initialPullDone = true;
       return;
     }
-    pulling = true;
     // Wipe local ab.* keys then write cloud values, then reload so React
     // re-reads its initial state from the freshly-populated localStorage.
     const keysToRemove = [];
@@ -690,18 +719,33 @@ async function pullFromCloud(user, opts = {}) {
     Object.keys(data).forEach(k => origSetItem(k, data[k]));
     origSetItem('ab.lastSync', String(cloudUpdated));
     pulling = false;
+    initialPullDone = true;
     console.log('[AB sync] pulled', Object.keys(data).length, 'keys, reloading');
     window.location.reload();
   } catch (e) {
     console.warn('[AB sync] pull failed', e);
     pulling = false;
+    // Don't deadlock pushes if pull errors — let local writes proceed.
+    // The user can hit ↻ to retry the pull manually.
+    initialPullDone = true;
   }
 }
 
 const authListeners = new Set();
 onAuthStateChanged(auth, async (user) => {
+  // Reset gate on every auth transition. If signing in, pullFromCloud
+  // sets it back to true once the cloud state is reconciled. If signing
+  // out, the !currentUser check in pushNow/schedulePush blocks pushes
+  // anyway, so the gate state is moot.
+  initialPullDone = false;
   currentUser = user;
-  if (user) await pullFromCloud(user);
+  if (user) {
+    await pullFromCloud(user);
+  } else {
+    // No cloud to reconcile against — unlock pushes (they won't fire
+    // since currentUser is null, but keep state consistent).
+    initialPullDone = true;
+  }
   authListeners.forEach(cb => { try { cb(user); } catch {} });
 });
 
@@ -739,6 +783,7 @@ window.AB_FB = {
     if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
     await fbSignOut(auth);
     currentUser = null;
+    initialPullDone = false;
   },
   syncNow: () => pushNow(),
   pullNow: () => currentUser ? pullFromCloud(currentUser, { force: true }) : Promise.resolve(),
