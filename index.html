@@ -1037,21 +1037,44 @@ function recipeKeywords(name) {
     .slice(0, 3);
 }
 
+// When a recipe was generated from a free-form user description, the LLM
+// may pick a name that omits the actual main ingredient (e.g. user types
+// "homemade chicken curry" and the LLM names it "Curry Bowl" → image
+// search keys on "curry", "bowl" and finds something off). Using the
+// description as a hint pulls richer keywords from what the user
+// actually said.
+function recipeImageKeywords(r) {
+  const hint = r && r.searchHint;
+  if (hint && typeof hint === 'string' && hint.trim()) {
+    const kws = (hint.toLowerCase()
+      .split(/[^a-z]+/)
+      .filter(w => w.length > 2 && !RECIPE_STOP.has(w)));
+    if (kws.length) return kws.slice(0, 4);
+  }
+  return recipeKeywords(r && r.name);
+}
+
 // Ordered list of image sources to try. Real photos first, AI as a fallback,
 // emoji as the very last resort. RecipeThumb cycles through them on <img> error.
 function recipePhotoSources(r, w, h) {
   const W = w || 600, H = h || 400;
   const seed = recipeSeed(r);
   const name = (r && r.name) || 'home cooked meal';
-  const kws = recipeKeywords(name);
+  // Prefer searchHint-derived keywords (set when user described the recipe)
+  // since the LLM-chosen name sometimes omits the actual main ingredient.
+  const kws = recipeImageKeywords(r);
   const tags = ['food', ...kws].join(',');
+  // The Pollinations prompt also benefits from the original description,
+  // since "professional photo of <user's chicken curry description>" beats
+  // "professional photo of <LLM-chosen short name>".
+  const aiSubject = (r && r.searchHint && r.searchHint.trim()) || name;
   const out = [];
   // og:image captured during URL import — always preferred when present
   if (r && r.image) out.push(r.image);
   // Loremflickr: real Flickr photos tagged "food" + recipe keywords. Free, no key.
   out.push(`https://loremflickr.com/${W}/${H}/${encodeURIComponent(tags)}?lock=${seed}`);
   // Pollinations: AI-generated food photo. Last-resort image before the emoji.
-  const prompt = encodeURIComponent(`professional food photography, overhead shot, ${name}, on a plate`);
+  const prompt = encodeURIComponent(`professional food photography, overhead shot, ${aiSubject}, on a plate`);
   out.push(`https://image.pollinations.ai/prompt/${prompt}?width=${W}&height=${H}&nologo=true&seed=${seed}`);
   return out;
 }
@@ -1111,9 +1134,14 @@ Rules — apply consistently:
 
 INGREDIENTS: short noun phrases, no quantities/units/parens. Strip prep verbs (minced, chopped, sliced, grated, shredded, fresh, diced, halved, thinly, finely, softened, drained, rinsed, "boneless skinless", large, "for serving", "for garnish", "to taste"). Keep "ground", "dried", "frozen", "whole", "low-fat", "extra-virgin" only if material to what to buy.
 
-INGREDIENTS_WITH_QTY: parallel array, SAME LENGTH and ORDER as ingredients. Each entry includes the original quantity + unit + ingredient as stated in the recipe (e.g. "2 lbs chicken breasts", "1 cup soy sauce", "3 cloves garlic"). If the recipe says "to taste" or no quantity, use just the ingredient phrase. Do NOT strip prep verbs here — keep the full original phrasing.
+INGREDIENTS_WITH_QTY: parallel array, SAME LENGTH and ORDER as ingredients. Each entry MUST include the original quantity + unit + ingredient as stated in the recipe (e.g. "2 lbs chicken breasts", "1 cup soy sauce", "3 cloves garlic", "1/2 tsp kosher salt"). NEVER drop the quantity. If the recipe says "to taste" or no quantity, use just the ingredient phrase. Do NOT strip prep verbs here — keep the full original phrasing including prep instructions ("minced", "diced", "softened", etc.).
 
-STEPS: numbered cooking steps, concise (one sentence each).
+STEPS: every cooking step from the source, in order. Preserve ALL of:
+- prep instructions (e.g. "Preheat oven to 400°F", "Line a baking sheet with parchment", "Bring a large pot of salted water to a boil")
+- exact temperatures (°F or °C — keep whatever the source uses)
+- exact times ("cook for 8-10 minutes", "simmer 25 minutes", "bake until internal temp reaches 165°F")
+- exact quantities or visual cues stated in the step ("until golden brown", "1 minute per side")
+Keep steps concise (one sentence each) but NEVER compress two distinct actions into one, and NEVER drop temperature/time/temperature-check details. If the source recipe lists the prep step ("Preheat oven to 400°F") it MUST appear as step 1 — do not skip it.
 
 ACTIVE MINUTES (hands-on): chopping, measuring, mixing, searing, sautéing constant-stir, assembling, stuffing, breading, rolling, layering, finishing.
 PASSIVE MINUTES (unattended): oven baking after putting in, simmering on low after established, slow cooker/braise, marinate, chill, rise, covered rice cooking.
@@ -1303,6 +1331,10 @@ function normalizeRecipeFromLlm(parsed, fallback) {
   if (isFast && !out.tags.includes('fast')) out.tags.push('fast');
   if (!isFast) out.tags = out.tags.filter(t => t !== 'fast');
   if (fallback && fallback.image) out.image = fallback.image;
+  // searchHint: the user's original description, kept ONLY for image
+  // keyword extraction. Set when generating from a description; absent
+  // for URL imports (those have og:image as the strong source).
+  if (fallback && fallback.searchHint) out.searchHint = fallback.searchHint;
   return out;
 }
 
@@ -4110,7 +4142,10 @@ function AddRecipeDescribeScreen({ onBack, apiKey, onSave, onTab }) {
         user: `Build a recipe from this description. Leave "url" as an empty string. Description:\n\n${text}`,
       });
       const parsed = extractJson(out);
-      const recipe = normalizeRecipeFromLlm(parsed, { url: '' });
+      // Pass the original description through as searchHint so the image
+      // search keys on the user's words (e.g. "chicken curry") even when
+      // the LLM picks a name that omits the protein.
+      const recipe = normalizeRecipeFromLlm(parsed, { url: '', searchHint: text });
       setData(recipe);
       setStage('preview');
     } catch (e) {
@@ -4267,14 +4302,16 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const ingredients = Array.isArray(r.ingredients) ? r.ingredients : [];
   const steps = Array.isArray(r.steps) ? r.steps : [];
 
-  // Names currently on the grocery list (lowercase). Drives the checkbox
-  // state for every ingredient row — checked = on the list, unchecked = not.
-  // Tapping a row toggles immediately, no commit step.
-  const groceryNames = (() => {
-    const s = new Set();
-    (groceryList || []).forEach(it => { if (it && it.n) s.add(it.n.toLowerCase()); });
-    return s;
+  // Map of lowercase name → grocery item, so we can read both presence
+  // (drives the checkbox) AND the item's `done` state (drives the
+  // crossed-off look — checking it off in the grocery list propagates
+  // back to the recipe view).
+  const groceryByName = (() => {
+    const m = {};
+    (groceryList || []).forEach(it => { if (it && it.n) m[it.n.toLowerCase()] = it; });
+    return m;
   })();
+  const groceryNames = new Set(Object.keys(groceryByName));
   const recipeName = r.name || 'Recipe';
 
   // Tap an ingredient row → add to grocery list (or remove if already on it).
@@ -4491,7 +4528,9 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
               {ingredients.map((ing, i) => {
                 const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
                 const parsed = raw ? parseItem(raw) : null;
-                const onList = groceryNames.has((ing || '').toLowerCase());
+                const groceryItem = groceryByName[(ing || '').toLowerCase()];
+                const onList = !!groceryItem;
+                const isBought = onList && groceryItem.done;
                 const tappable = !!setGroceryList;
                 return (
                   <div
@@ -4502,9 +4541,11 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                       borderBottom:'1px dashed var(--border-dim)',
                       fontSize:17,
                       cursor: tappable ? 'pointer' : 'default',
-                      background: onList ? 'rgba(124,58,237,0.10)' : 'transparent',
-                      borderRadius: onList ? 6 : 0,
+                      background: isBought ? 'transparent' : (onList ? 'rgba(124,58,237,0.10)' : 'transparent'),
+                      borderRadius: onList && !isBought ? 6 : 0,
                       alignItems:'center',
+                      opacity: isBought ? 0.5 : 1,
+                      textDecoration: isBought ? 'line-through' : 'none',
                     }}
                   >
                     {tappable ? (
