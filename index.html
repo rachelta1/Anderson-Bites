@@ -2404,8 +2404,26 @@ function Toggle({ on, onChange }) {
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DAY_LETTERS = ['S','M','T','W','T','F','S'];
 const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-const BASE_SUNDAY = new Date(2026, 3, 26); // Sun Apr 26, 2026 (week 0 anchor)
-const TODAY = new Date(2026, 3, 28);        // Tue Apr 28, 2026
+const BASE_SUNDAY = new Date(2026, 3, 26); // Sun Apr 26, 2026 (week-offset epoch)
+// NOTE: do NOT change BASE_SUNDAY — every weekMap key is an offset *from*
+// this date. Shifting it would silently relabel every saved week's plans.
+// Today's date is always derived dynamically below.
+
+// Today at local midnight, computed fresh on each call so the app stays
+// correct across sessions and across midnight rollovers within a session.
+const todayMidnight = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+// Which weekOffset corresponds to "this week" right now. Used to default
+// the Week tab and Auto-Plan tab to the current week instead of always
+// starting at week 0 (which gets stale within a single week of BASE_SUNDAY).
+const currentWeekOffset = () => {
+  const diffMs = todayMidnight().getTime() - BASE_SUNDAY.getTime();
+  return Math.floor(diffMs / (7 * 24 * 3600 * 1000));
+};
 
 // Normalize a breakfast field to string[]: legacy data may be a single string,
 // null, undefined, or already an array. Filter out empties so consumers can
@@ -2438,6 +2456,7 @@ function mergeWeek(fresh, persisted) {
 function buildWeek(offset) {
   const start = new Date(BASE_SUNDAY);
   start.setDate(start.getDate() + offset * 7);
+  const todayMs = todayMidnight().getTime();
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(start);
     d.setDate(d.getDate() + i);
@@ -2447,7 +2466,7 @@ function buildWeek(offset) {
       label: DAY_NAMES[i],
       month: MONTHS[d.getMonth()],
       planned: false,
-      today: d.getTime() === TODAY.getTime(),
+      today: d.getTime() === todayMs,
       meals: { b: [], d: null, snacks: [] },
       tasks: [],
     };
@@ -4696,7 +4715,9 @@ function AutoPlanScreen({
   catCache, setCatCache,
   onSettings,
 }) {
-  const [planOffset, setPlanOffset] = useState(0);
+  // Default Auto-Plan to the current week so the user never accidentally
+  // generates a plan for last week.
+  const [planOffset, setPlanOffset] = useState(() => currentWeekOffset());
   const [daysByOffset, setDaysByOffset] = usePersistedState('ab.autoplan.daysByOffset', {});
   // Always rebuild labels/dates from buildPlanDays; only preserve `on` flags from persisted data
   const days = (() => {
@@ -5427,8 +5448,10 @@ function App() {
   const [subscreen, setSubscreen] = useState(null); // 'recipe-detail' | 'add-recipe' | 'add-url' | 'add-describe'
   const [selectedRecipe, setSelectedRecipe] = useState(null);
 
-  // Week state — keyed by offset so changes persist when navigating weeks
-  const [weekOffset, setWeekOffset] = useState(0);
+  // Week state — keyed by offset so changes persist when navigating weeks.
+  // Defaults to the current real-world week (not a hardcoded 0) so the app
+  // never opens on "last week" once today crosses a Sunday boundary.
+  const [weekOffset, setWeekOffset] = useState(() => currentWeekOffset());
   const [weekMap, setWeekMap] = usePersistedState('ab.weekPlans', () => ({ 0: seedWeekZero() }));
   const [recipeDB, setRecipeDB] = usePersistedState('ab.recipes.v4', RECIPES);
   const [cookingHistory, setCookingHistory] = usePersistedState('ab.cookingHistory', []);
