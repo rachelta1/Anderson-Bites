@@ -1303,6 +1303,59 @@ function trimHtmlForLlm(html, max) {
   return text;
 }
 
+// Pull schema.org Recipe data out of any JSON-LD <script> blocks. Most
+// major recipe sites (NYT Cooking, Bon Appetit, Food52, Allrecipes, etc.)
+// publish their canonical recipe with EXACT ingredient quantities (incl.
+// fractions like "1/2 cup") and EXACT instruction steps in this block —
+// far cleaner than the visual HTML, which mixes recipe text with ads,
+// "jump to recipe" buttons, related articles, and comment threads.
+//
+// Returns the first Recipe node found, or null. Walks @graph and arrays
+// because some sites bundle multiple JSON-LD types in one block.
+function extractRecipeSchema(html) {
+  if (!html || typeof html !== 'string') return null;
+  const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const raw = m[1].trim();
+    if (!raw) continue;
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch { continue; }
+    const recipe = findRecipeNode(parsed);
+    if (recipe) return recipe;
+  }
+  return null;
+}
+
+// Recursive search for a Recipe node in arbitrarily-nested JSON-LD.
+// Some sites use top-level @graph arrays; others nest inside itemListElement;
+// others put the recipe directly at the root.
+function findRecipeNode(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  const t = obj['@type'];
+  if (t === 'Recipe' || (Array.isArray(t) && t.includes('Recipe'))) return obj;
+  if (Array.isArray(obj['@graph'])) {
+    for (const item of obj['@graph']) {
+      const r = findRecipeNode(item);
+      if (r) return r;
+    }
+  }
+  if (Array.isArray(obj.itemListElement)) {
+    for (const item of obj.itemListElement) {
+      const r = findRecipeNode(item);
+      if (r) return r;
+    }
+  }
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const r = findRecipeNode(item);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
 function normalizeRecipeFromLlm(parsed, fallback) {
   const ingredients = Array.isArray(parsed.ingredients) ? parsed.ingredients.filter(Boolean) : [];
   let ingredientsWithQty = Array.isArray(parsed.ingredientsWithQty) ? parsed.ingredientsWithQty : [];
@@ -2919,9 +2972,27 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
 ═══════════════════════════════════════════ */
 /* Try to extract a leading quantity from text like "2 lbs salmon" → { q:'2 lbs', n:'salmon' } */
 function parseItem(text) {
-  const m = text.trim().match(/^(\d+(?:\.\d+)?(?:\s*(?:lb|lbs|oz|kg|g|cup|cups|tbsp|tsp|jar|jars|box|boxes|bag|bags|can|cans|bottle|bottles|bunch|head|cloves?|pkg))?)\s+(.+)$/i);
-  if (m) return { q: m[1], n: m[2] };
-  return { q: '', n: text.trim() };
+  const t = text.trim();
+  // Number forms (in priority order so the regex engine doesn't grab the
+  // integer part of a mixed number like "1 1/2" too eagerly):
+  //   - mixed: "1 1/2"
+  //   - fraction: "1/2"
+  //   - decimal: "2.5"
+  //   - integer: "2"
+  //   - unicode fraction: ½ ⅓ ⅔ ¼ ¾ ⅛ ⅜ ⅝ ⅞ ⅕ ⅖ ⅗ ⅘ ⅙ ⅚
+  const NUM = '(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?|[½⅓⅔¼¾⅛⅜⅝⅞⅕⅖⅗⅘⅙⅚])';
+  // Unit tokens that count as part of the qty (optional). Plural variants
+  // included so "2 cans" parses as one qty token, not "2" + name "cans".
+  const UNIT = '\\s*(?:lb|lbs|oz|kg|g|cup|cups|tbsp|tsp|jar|jars|box|boxes|bag|bags|can|cans|bottle|bottles|bunch|bunches|head|heads|cloves?|pkg|stick|sticks|inch|in|pinch|dash)?';
+  // Inline parenthetical sizing like "(15 oz)" common in canned goods.
+  const PAREN = '(?:\\s*\\([^)]*\\))?';
+  // Some sites write "2 (15 oz) cans tomatoes" — the trailing unit lives
+  // AFTER the paren, so allow another optional unit slot here.
+  const UNIT2 = '(?:\\s*(?:cans?|bottles?|boxes?|bags?|jars?|sticks?|pkg))?';
+  const re = new RegExp('^(' + NUM + UNIT + PAREN + UNIT2 + ')\\s+(.+)$', 'i');
+  const m = t.match(re);
+  if (m) return { q: m[1].trim(), n: m[2].trim() };
+  return { q: '', n: t };
 }
 
 /* Order matters: more specific categories (multi-word keywords) come first
@@ -4048,11 +4119,24 @@ function AddRecipeURLScreen({ onBack, apiKey, onSave, onTab }) {
     try {
       const html = await fetchPageHtml(trimmed);
       const ogImage = extractOgImage(html);
-      const cleaned = trimHtmlForLlm(html, 60000);
+      // PREFER structured Recipe data when the site publishes it. JSON-LD
+      // has the canonical ingredient list (with fractions intact) and the
+      // canonical instruction steps in clean form — no "jump to recipe"
+      // buttons, no ads, no related-article noise. The LLM's job becomes
+      // a near-mechanical copy.
+      const recipeSchema = extractRecipeSchema(html);
+      let userMsg;
+      if (recipeSchema) {
+        const schemaJson = JSON.stringify(recipeSchema, null, 2).slice(0, 60000);
+        userMsg = `Source URL: ${trimmed}\n\nThis is a URL IMPORT. The site published structured Recipe data (schema.org JSON-LD) below — this is the CANONICAL source of truth.\n\nCopy each entry of recipeIngredient VERBATIM into ingredientsWithQty (preserve every fraction, unit, and prep modifier exactly — "1/2 cup", "2/3 lb", "1 (15 oz) can", etc.).\n\nCopy each entry of recipeInstructions VERBATIM into steps. recipeInstructions may be:\n- an array of HowToStep objects (use the .text field of each)\n- an array of HowToSection objects with itemListElement (flatten in order, use .text from each step)\n- an array of plain strings (use as-is)\n- a single string (split by sentence/numbered step)\nKeep prep instructions ("Preheat oven to..."), exact times, exact temperatures, and doneness cues. Do NOT paraphrase, summarize, or invent. Set "url" to the source URL.\n\n--- STRUCTURED RECIPE DATA ---\n${schemaJson}\n--- END ---`;
+      } else {
+        const cleaned = trimHtmlForLlm(html, 60000);
+        userMsg = `Source URL: ${trimmed}\n\nThis is a URL IMPORT. The site does NOT publish structured Recipe data, so extract from the HTML below. Copy the recipe's ingredients (with quantities, including fractions like "1/2 cup") and instruction steps VERBATIM — do not paraphrase, summarize, or invent. Preserve every step exactly as written, including prep ("Preheat oven to 400°F"), exact times, exact temperatures, and doneness cues. Set "url" to the source URL.\n\n--- HTML START ---\n${cleaned}\n--- HTML END ---`;
+      }
       const text = await callClaude({
         apiKey,
         system: RECIPE_SCHEMA_PROMPT,
-        user: `Source URL: ${trimmed}\n\nThis is a URL IMPORT. Copy the recipe's ingredients (with quantities) and instruction steps VERBATIM from the HTML — do not paraphrase, summarize, or invent. Preserve every step exactly as written, including prep ("Preheat oven to 400°F"), exact times, exact temperatures, and doneness cues. Set "url" to the source URL.\n\n--- HTML START ---\n${cleaned}\n--- HTML END ---`,
+        user: userMsg,
       });
       const parsed = extractJson(text);
       const recipe = normalizeRecipeFromLlm(parsed, { url: trimmed, image: ogImage });
