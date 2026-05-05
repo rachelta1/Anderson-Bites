@@ -1134,14 +1134,18 @@ Rules — apply consistently:
 
 INGREDIENTS: short noun phrases, no quantities/units/parens. Strip prep verbs (minced, chopped, sliced, grated, shredded, fresh, diced, halved, thinly, finely, softened, drained, rinsed, "boneless skinless", large, "for serving", "for garnish", "to taste"). Keep "ground", "dried", "frozen", "whole", "low-fat", "extra-virgin" only if material to what to buy.
 
-INGREDIENTS_WITH_QTY: parallel array, SAME LENGTH and ORDER as ingredients. Each entry MUST include the original quantity + unit + ingredient as stated in the recipe (e.g. "2 lbs chicken breasts", "1 cup soy sauce", "3 cloves garlic", "1/2 tsp kosher salt"). NEVER drop the quantity. If the recipe says "to taste" or no quantity, use just the ingredient phrase. Do NOT strip prep verbs here — keep the full original phrasing including prep instructions ("minced", "diced", "softened", etc.).
+INGREDIENTS_WITH_QTY: parallel array, SAME LENGTH and ORDER as ingredients.
+- If the input contains source recipe text/HTML (URL import): copy each ingredient line VERBATIM from the source, exactly as written. Preserve original quantity, unit, ingredient, and prep modifier. Do not paraphrase, do not normalize fractions, do not reorder words. Examples: "2 lbs boneless skinless chicken breasts", "1 (15 oz) can black beans, drained and rinsed", "1/2 tsp kosher salt".
+- If the input is only a free-form user description (no source recipe): write each line in the same shape ("<qty> <unit> <ingredient>") using the quantities the user mentioned, or omit the qty if the user didn't specify one.
+NEVER drop the quantity when the source has one.
 
-STEPS: every cooking step from the source, in order. Preserve ALL of:
-- prep instructions (e.g. "Preheat oven to 400°F", "Line a baking sheet with parchment", "Bring a large pot of salted water to a boil")
-- exact temperatures (°F or °C — keep whatever the source uses)
-- exact times ("cook for 8-10 minutes", "simmer 25 minutes", "bake until internal temp reaches 165°F")
-- exact quantities or visual cues stated in the step ("until golden brown", "1 minute per side")
-Keep steps concise (one sentence each) but NEVER compress two distinct actions into one, and NEVER drop temperature/time/temperature-check details. If the source recipe lists the prep step ("Preheat oven to 400°F") it MUST appear as step 1 — do not skip it.
+STEPS:
+- If the input contains source recipe text/HTML (URL import): copy the recipe's instructions VERBATIM, in order, one source step per array entry. Do NOT rewrite, paraphrase, summarize, or compress. Do NOT add steps the source didn't have. Do NOT drop steps the source DID have, including:
+  · prep steps ("Preheat oven to 400°F", "Line a baking sheet with parchment", "Bring a large pot of salted water to a boil")
+  · exact temperatures, exact times, doneness checks ("8-10 minutes", "until internal temp reaches 165°F", "until golden brown")
+  · per-side / per-batch instructions ("1 minute per side", "in 2 batches")
+  The ONLY edits allowed: strip ad inserts, "Step N." prefixes the source already added, and trailing whitespace. Otherwise the words must match the source.
+- If the input is only a free-form user description (no source recipe): write the steps directly from what the user described, in their order. Use their wording. Do not invent details (temperatures, times) the user did not give — say "until done" or omit specifics they left out.
 
 ACTIVE MINUTES (hands-on): chopping, measuring, mixing, searing, sautéing constant-stir, assembling, stuffing, breading, rolling, layering, finishing.
 PASSIVE MINUTES (unattended): oven baking after putting in, simmering on low after established, slow cooker/braise, marinate, chill, rise, covered rice cooking.
@@ -4048,7 +4052,7 @@ function AddRecipeURLScreen({ onBack, apiKey, onSave, onTab }) {
       const text = await callClaude({
         apiKey,
         system: RECIPE_SCHEMA_PROMPT,
-        user: `Source URL: ${trimmed}\n\nExtract the recipe from this HTML. Set "url" to the source URL.\n\n--- HTML START ---\n${cleaned}\n--- HTML END ---`,
+        user: `Source URL: ${trimmed}\n\nThis is a URL IMPORT. Copy the recipe's ingredients (with quantities) and instruction steps VERBATIM from the HTML — do not paraphrase, summarize, or invent. Preserve every step exactly as written, including prep ("Preheat oven to 400°F"), exact times, exact temperatures, and doneness cues. Set "url" to the source URL.\n\n--- HTML START ---\n${cleaned}\n--- HTML END ---`,
       });
       const parsed = extractJson(text);
       const recipe = normalizeRecipeFromLlm(parsed, { url: trimmed, image: ogImage });
