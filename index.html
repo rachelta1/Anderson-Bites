@@ -1745,7 +1745,7 @@ function assignBreakfastsWithInstructions(dinnerDays, tasksByDt, activeBreakfast
    Returns { dinnerDays, breakfastByDt, tasksByDt, byName, dinnerCandidates, recent }.
    When `instructions` is provided, explicit user weekday assignments ("laundry
    thursday", "pancakes saturday") take priority over rule-based defaults. */
-function buildPlanContext({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, instructions }) {
+function buildPlanContext({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions }) {
   const dinnerDays = days.filter(d => d.on);
   const activeBreakfasts = breakfastPicks.filter(p => p && p !== BREAKFAST_NONE);
   const activeTasks = tasks.filter(t => t.on).map(t => t.name);
@@ -1756,11 +1756,17 @@ function buildPlanContext({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, c
   const byName = {};
   recipeDB.forEach(r => { byName[r.name] = r; });
   const minOffset = dinnerDays.length ? Math.min(...dinnerDays.map(d => d.weekOffset)) : 0;
+  // Union of two sources so MANUALLY-added past meals also block re-planning,
+  // not just auto-planned ones. cookingHistory is kept for backwards-compat
+  // (it's the only place legacy auto-plan runs recorded their results) but
+  // weekMap is now the primary source — it always reflects what's actually
+  // scheduled, manual or otherwise.
   const recent = new Set(
-    cookingHistory
+    (cookingHistory || [])
       .filter(h => minOffset - h.weekOffset < avoidWeeks)
       .map(h => h.name)
   );
+  recentlyCookedFromWeekMap(weekMap, minOffset, avoidWeeks).forEach(n => recent.add(n));
   const dinnerCandidates = recipeDB.filter(isAutoplanEligible);
   return { dinnerDays, breakfastByDt, tasksByDt, byName, dinnerCandidates, recent };
 }
@@ -1790,8 +1796,8 @@ function seededShuffle(arr, seed) {
   return out;
 }
 
-async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, instructions, seed, excludeDinners }) {
-  const ctx = buildPlanContext({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, instructions });
+async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions, seed, excludeDinners }) {
+  const ctx = buildPlanContext({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions });
   const { dinnerDays, breakfastByDt, tasksByDt, byName, dinnerCandidates, recent } = ctx;
   if (dinnerDays.length === 0 || dinnerCandidates.length === 0) {
     throw new Error('No dinner days or no recipes');
@@ -2123,7 +2129,7 @@ Return ONLY JSON, no prose, no markdown.`;
   return result;
 }
 
-function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, instructions, seed, excludeDinners }) {
+function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions, seed, excludeDinners }) {
   const dinnerDays = days.filter(d => d.on);
   const activeBreakfasts = breakfastPicks.filter(p => p && p !== BREAKFAST_NONE);
   const activeTasks = tasks.filter(t => t.on).map(t => t.name);
@@ -2146,10 +2152,13 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
 
   const minOffset = dinnerDays.length ? Math.min(...dinnerDays.map(d => d.weekOffset)) : 0;
   const recent = new Set(
-    cookingHistory
+    (cookingHistory || [])
       .filter(h => minOffset - h.weekOffset < avoidWeeks)
       .map(h => h.name)
   );
+  // Also block recipes that show up on past days in weekMap — covers
+  // manually-added meals that never made it into cookingHistory.
+  recentlyCookedFromWeekMap(weekMap, minOffset, avoidWeeks).forEach(n => recent.add(n));
 
   const dinnerCandidates = recipeDB.filter(isAutoplanEligible);
   const usedThisRun = new Set();
@@ -2560,6 +2569,66 @@ function buildWeek(offset) {
       tasks: [],
     };
   });
+}
+
+// Walk weekMap and count, per recipe name, how many times it appears on
+// a STRICTLY-PAST day (any breakfast or dinner slot). This is the source
+// of truth for "used" counts — not cookingHistory, which only captures
+// auto-planned meals and would miss manual entries. Today is excluded
+// because the user may not have cooked it yet.
+function recipeUsedCounts(weekMap) {
+  const out = {};
+  if (!weekMap || typeof weekMap !== 'object') return out;
+  const todayMs = todayMidnight().getTime();
+  Object.keys(weekMap).forEach(offsetKey => {
+    const offset = parseInt(offsetKey, 10);
+    if (isNaN(offset)) return;
+    const week = weekMap[offset];
+    if (!Array.isArray(week)) return;
+    const weekStart = new Date(BASE_SUNDAY);
+    weekStart.setDate(weekStart.getDate() + offset * 7);
+    week.forEach((day, slotIdx) => {
+      if (!day || !day.meals) return;
+      const dayDate = new Date(weekStart);
+      dayDate.setDate(dayDate.getDate() + slotIdx);
+      if (dayDate.getTime() >= todayMs) return; // future or today
+      if (day.meals.d && typeof day.meals.d === 'string') {
+        out[day.meals.d] = (out[day.meals.d] || 0) + 1;
+      }
+      const b = day.meals.b;
+      if (Array.isArray(b)) {
+        b.forEach(name => {
+          if (name && typeof name === 'string') out[name] = (out[name] || 0) + 1;
+        });
+      } else if (typeof b === 'string' && b) {
+        out[b] = (out[b] || 0) + 1;
+      }
+    });
+  });
+  return out;
+}
+
+// Names of recipes cooked within the rotation-avoidance window. Pulled
+// from weekMap (past meals on or after `minOffset - avoidWeeks` weeks ago)
+// so MANUALLY-added past meals also block re-planning, not just
+// auto-planned ones. Returns a plain Set<string>.
+function recentlyCookedFromWeekMap(weekMap, minOffset, avoidWeeks) {
+  const out = new Set();
+  if (!weekMap || typeof weekMap !== 'object') return out;
+  Object.keys(weekMap).forEach(offsetKey => {
+    const offset = parseInt(offsetKey, 10);
+    if (isNaN(offset)) return;
+    if (offset >= minOffset) return;             // future / current week — not in the past
+    if (minOffset - offset >= avoidWeeks) return;// too far back to block
+    const week = weekMap[offset];
+    if (!Array.isArray(week)) return;
+    week.forEach(day => {
+      if (day && day.meals && day.meals.d && typeof day.meals.d === 'string') {
+        out.add(day.meals.d);
+      }
+    });
+  });
+  return out;
 }
 
 function weekRangeLabel(offset) {
@@ -5256,7 +5325,7 @@ function AutoPlanScreen({
       try {
         perDay = await pickPlanWithLLM({
           apiKey, recipeDB, days, breakfastPicks, tasks,
-          avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, instructions, seed,
+          avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
           excludeDinners,
         });
         llmUsed = true;
@@ -5264,7 +5333,7 @@ function AutoPlanScreen({
         llmFailureNote = `LLM picker failed (${e.message}); using rule-based`;
         perDay = pickPlan({
           recipeDB, days, breakfastPicks, tasks,
-          avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, instructions, seed,
+          avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
           excludeDinners,
         });
       } finally {
@@ -5273,7 +5342,7 @@ function AutoPlanScreen({
     } else {
       perDay = pickPlan({
         recipeDB, days, breakfastPicks, tasks,
-        avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, instructions, seed,
+        avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
         excludeDinners,
       });
       if (!apiKey && instructions && instructions.trim()) {
@@ -5582,7 +5651,15 @@ function App() {
   // never opens on "last week" once today crosses a Sunday boundary.
   const [weekOffset, setWeekOffset] = useState(() => currentWeekOffset());
   const [weekMap, setWeekMap] = usePersistedState('ab.weekPlans', () => ({ 0: seedWeekZero() }));
-  const [recipeDB, setRecipeDB] = usePersistedState('ab.recipes.v4', RECIPES);
+  const [recipeDBRaw, setRecipeDB] = usePersistedState('ab.recipes.v4', RECIPES);
+  // Inject live "used" counts derived from past meals in weekMap. The
+  // persisted recipe doesn't store this — it's recomputed on every render
+  // so manually-added past meals show up immediately, and the count stays
+  // accurate as days roll into the past without any explicit increment.
+  const recipeDB = (() => {
+    const counts = recipeUsedCounts(weekMap);
+    return recipeDBRaw.map(r => ({ ...r, used: counts[r.name] || 0 }));
+  })();
   const [cookingHistory, setCookingHistory] = usePersistedState('ab.cookingHistory', []);
   const [pantryStaples, setPantryStaples] = usePersistedState('ab.pantryStaples', DEFAULT_PANTRY);
   const [groceryList, setGroceryList] = usePersistedState('ab.groceryList', GROCERY_ITEMS);
@@ -5654,7 +5731,7 @@ function App() {
 
   const handleSaveNewRecipe = (data) => {
     if (!data) return;
-    const nextId = recipeDB.reduce((m, r) => Math.max(m, r.id || 0), 0) + 1;
+    const nextId = recipeDBRaw.reduce((m, r) => Math.max(m, r.id || 0), 0) + 1;
     const minutes = typeof data.estMinutes === 'number' && data.estMinutes > 0
       ? data.estMinutes
       : (Number(data.activeMinutes) || 0) + (Number(data.passiveMinutes) || 0) || null;
@@ -5665,7 +5742,9 @@ function App() {
       estMinutes: minutes || data.estMinutes,
       used: 0,
     };
-    setRecipeDB([newRecipe, ...recipeDB]);
+    // Write to the RAW persisted state — bypassing the derived `used` injection
+    // so localStorage doesn't snapshot an augmented copy.
+    setRecipeDB([newRecipe, ...recipeDBRaw]);
     setSelectedRecipe(newRecipe);
     setSubscreen('recipe-detail');
   };
