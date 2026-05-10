@@ -2546,11 +2546,23 @@ const todayMidnight = () => {
 };
 
 // Which weekOffset corresponds to "this week" right now. Used to default
-// the Week tab and Auto-Plan tab to the current week instead of always
-// starting at week 0 (which gets stale within a single week of BASE_SUNDAY).
+// the Week tab to the current week instead of always starting at week 0
+// (which gets stale within a single week of BASE_SUNDAY).
 const currentWeekOffset = () => {
   const diffMs = todayMidnight().getTime() - BASE_SUNDAY.getTime();
   return Math.floor(diffMs / (7 * 24 * 3600 * 1000));
+};
+
+// AutoPlan uses Monday-anchored week semantics (planOffset 0 = Mon Apr 27).
+// On a Sunday like May 10, currentWeekOffset() returns 2 (Sun-Sat week
+// May 10–16) but the Mon–Sun week containing today is actually planOffset 1
+// (May 4 – May 11). They differ for Sundays. This helper returns the right
+// planOffset for the AutoPlan tab.
+const currentPlanOffset = () => {
+  const baseMon = new Date(BASE_SUNDAY);
+  baseMon.setDate(baseMon.getDate() + 1); // Mon Apr 27
+  const diffDays = Math.floor((todayMidnight().getTime() - baseMon.getTime()) / (24 * 3600 * 1000));
+  return Math.floor(diffDays / 7);
 };
 
 // Normalize a breakfast field to string[]: legacy data may be a single string,
@@ -3296,6 +3308,18 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
   // items and a wall of pills made the modal feel heavy. Header shows the
   // count + count of overrides; user expands to review.
   const [pantryOpen, setPantryOpen] = useState(false);
+  // "Keep" set: keys of "<weekOffset>-<slotIdx>" the user has locked. On
+  // reroll these dinners are preserved as-is; only the unlocked slots get
+  // re-picked. Lets the user tweak a plan they mostly like instead of
+  // rerolling the whole thing.
+  const [keptKeys, setKeptKeys] = useState(() => new Set());
+  const toggleKeep = (key) => {
+    setKeptKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
   // Recipe peek: user tapped a dinner/breakfast row to inspect it. Layered on
   // top via RecipePeekSheet; closing returns to the preview with all state
   // (excluded staples, pantryOpen, ...) intact.
@@ -3340,9 +3364,32 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
               const bfList = (Array.isArray(breakfasts) && breakfasts.length)
                 ? breakfasts
                 : (breakfast ? [breakfast] : []);
+              const slotKey = `${weekOffset}-${slotIdx}`;
+              const isKept = keptKeys.has(slotKey);
+              const hasDinner = !!(dinner && dinner.name);
               return (
-                <div key={`${weekOffset}-${slotIdx}`} style={{ background:'var(--card)', border:'1px solid var(--border-dim)', borderRadius:10, padding:'8px 10px' }}>
-                  <div style={{ fontSize:13, color:'var(--purple-light)', fontWeight:600, marginBottom:4 }}>{dayLabel}</div>
+                <div key={slotKey} style={{
+                  background:'var(--card)',
+                  border:`1px solid ${isKept ? 'var(--purple)' : 'var(--border-dim)'}`,
+                  borderRadius:10, padding:'8px 10px',
+                  boxShadow: isKept ? '0 0 0 1px var(--purple-mid) inset' : 'none',
+                }}>
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
+                    <div style={{ fontSize:13, color:'var(--purple-light)', fontWeight:600 }}>{dayLabel}</div>
+                    {hasDinner && onReroll && (
+                      <span
+                        onClick={() => toggleKeep(slotKey)}
+                        title={isKept ? 'Unlock — reroll will replace this dinner' : 'Keep this dinner when rerolling'}
+                        style={{
+                          fontSize:12, cursor:'pointer', userSelect:'none',
+                          padding:'2px 8px', borderRadius:4,
+                          background: isKept ? 'var(--purple-mid)' : 'transparent',
+                          border: `1px solid ${isKept ? 'var(--purple)' : 'var(--border)'}`,
+                          color: isKept ? 'var(--purple-light)' : 'var(--text-dimmer)',
+                        }}
+                      >{isKept ? '🔒 keep' : '🔓 keep'}</span>
+                    )}
+                  </div>
                   {bfList.map((b, i) => {
                     const peekable = isPeekable(b);
                     return (
@@ -3450,17 +3497,21 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
         <div style={{ display:'flex', gap:8, padding:'12px 0 4px' }}>
           <div
             className="gen-btn"
-            onClick={(rerolling || !onReroll) ? undefined : onReroll}
+            onClick={(rerolling || !onReroll) ? undefined : () => onReroll(keptKeys)}
             style={
               rerolling
                 ? { flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)', opacity:0.6, cursor:'wait' }
                 : { flex:1, background:'#202030', color:'var(--purple-light)', border:'1.5px solid var(--border)' }
             }
-            title="Pick a different set of recipes with the same constraints"
+            title={keptKeys.size > 0
+              ? `Keep ${keptKeys.size} dinner${keptKeys.size === 1 ? '' : 's'}, reroll the rest`
+              : 'Pick a different set of recipes with the same constraints'}
           >
             {rerolling
               ? '✦ Re-rolling…'
-              : `🎲 Reroll${rerollSeed != null ? ` (#${rerollSeed + 1})` : ''}`}
+              : keptKeys.size > 0
+                ? `🎲 Reroll others (keep ${keptKeys.size})`
+                : `🎲 Reroll${rerollSeed != null ? ` (#${rerollSeed + 1})` : ''}`}
           </div>
           <div
             className="gen-btn"
@@ -4903,6 +4954,9 @@ const PLAN_DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun','Mon'];
 function buildPlanDays(offset) {
   const monday = new Date(BASE_SUNDAY);
   monday.setDate(monday.getDate() + 1 + offset * 7);
+  // Pre-toggle the typical weekday-dinner days (Tue/Wed/Thu/Mon) only for
+  // the plan week containing TODAY, not the always-stale Apr 27 epoch.
+  const todayOffset = currentPlanOffset();
   return Array.from({ length: 8 }, (_, i) => {
     const d = new Date(monday);
     d.setDate(d.getDate() + i);
@@ -4912,7 +4966,7 @@ function buildPlanDays(offset) {
       dt: `${MONTHS[d.getMonth()]} ${d.getDate()}`,
       weekOffset: Math.floor(daysSinceBase / 7),
       slotIdx: ((daysSinceBase % 7) + 7) % 7,
-      on: offset === 0 ? PLAN_DAYS[i].on : false,
+      on: offset === todayOffset ? PLAN_DAYS[i].on : false,
     };
   });
 }
@@ -4925,10 +4979,15 @@ function planRangeLabel(offset) {
 }
 
 function planWeekTitle(offset) {
-  if (offset === 0) return 'This week';
-  if (offset === 1) return 'Next week';
-  if (offset === -1) return 'Last week';
-  return offset > 0 ? `In ${offset} weeks` : `${-offset} weeks ago`;
+  // Title is relative to the plan-offset that contains TODAY, not relative
+  // to a hardcoded 0. Without this, "This week" gets stuck on the Apr 27
+  // epoch and the actual current week reads as "In N weeks".
+  const todayOffset = currentPlanOffset();
+  const delta = offset - todayOffset;
+  if (delta === 0) return 'This week';
+  if (delta === 1) return 'Next week';
+  if (delta === -1) return 'Last week';
+  return delta > 0 ? `In ${delta} weeks` : `${-delta} weeks ago`;
 }
 
 const AVOID_OPTS = [1, 2, 3, 4, 6, 8];
@@ -4952,9 +5011,10 @@ function AutoPlanScreen({
   catCache, setCatCache,
   onSettings,
 }) {
-  // Default Auto-Plan to the current week so the user never accidentally
-  // generates a plan for last week.
-  const [planOffset, setPlanOffset] = useState(() => currentWeekOffset());
+  // Default Auto-Plan to the Mon–Sun week that contains today (NOT
+  // currentWeekOffset, which uses Sun–Sat semantics and would land on
+  // next week's plan whenever today is a Sunday).
+  const [planOffset, setPlanOffset] = useState(() => currentPlanOffset());
   const [daysByOffset, setDaysByOffset] = usePersistedState('ab.autoplan.daysByOffset', {});
   // Always rebuild labels/dates from buildPlanDays; only preserve `on` flags from persisted data
   const days = (() => {
@@ -5353,7 +5413,10 @@ function AutoPlanScreen({
   // modal, swaps perDay in place). Side-effects setGenLoading + setGenStatus.
   // excludeDinners: list of dinner names the user has already seen in earlier
   // reroll attempts of the same constraint session — picker filters them out.
-  const runPicker = async (seed, excludeDinners = []) => {
+  // daysOverride: when partial-rerolling, pass a `days` array with kept slots
+  // toggled off so the picker only fills the unlocked days.
+  const runPicker = async (seed, excludeDinners = [], daysOverride = null) => {
+    const effDays = daysOverride || days;
     const useLlm = !!(apiKey && instructions && instructions.trim());
     let perDay;
     let llmUsed = false;
@@ -5363,7 +5426,7 @@ function AutoPlanScreen({
       setGenStatus(seed > 1 ? '✦ Re-rolling…' : '✦ Asking Claude to honor your instructions…');
       try {
         perDay = await pickPlanWithLLM({
-          apiKey, recipeDB, days, breakfastPicks, tasks,
+          apiKey, recipeDB, days: effDays, breakfastPicks, tasks,
           avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
           excludeDinners,
         });
@@ -5371,7 +5434,7 @@ function AutoPlanScreen({
       } catch (e) {
         llmFailureNote = `LLM picker failed (${e.message}); using rule-based`;
         perDay = pickPlan({
-          recipeDB, days, breakfastPicks, tasks,
+          recipeDB, days: effDays, breakfastPicks, tasks,
           avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
           excludeDinners,
         });
@@ -5380,7 +5443,7 @@ function AutoPlanScreen({
       }
     } else {
       perDay = pickPlan({
-        recipeDB, days, breakfastPicks, tasks,
+        recipeDB, days: effDays, breakfastPicks, tasks,
         avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
         excludeDinners,
       });
@@ -5465,23 +5528,48 @@ function AutoPlanScreen({
   // not unmount). Carries forward EVERY dinner shown so far (history +
   // currently-displayed plan) as the exclusion list — the reroll must
   // produce something new.
-  const handleReroll = async () => {
+  //
+  // keptKeys: optional Set<"weekOffset-slotIdx"> of slots the user wants
+  // to LOCK — those dinners are preserved as-is and the picker only refills
+  // the remaining unlocked days.
+  const handleReroll = async (keptKeys) => {
     if (genLoading || !previewModal) return;
     const nextRerollSeed = rerollSeed + 1;
     const nextPickerSeed = pickerSeed + 1;
-    const currentPlanDinners = dinnerNamesOf(previewModal.perDay);
+    const currentPerDay = previewModal.perDay || [];
+    const keepSet = (keptKeys && keptKeys.size) ? keptKeys : new Set();
+
+    // Split current plan into kept (preserved) and reroll-eligible.
+    const keptEntries = currentPerDay.filter(p => keepSet.has(`${p.weekOffset}-${p.slotIdx}`));
+    const keptKeySet = new Set(keptEntries.map(p => `${p.weekOffset}-${p.slotIdx}`));
+
+    // Build a days array with kept slots toggled off so the picker only
+    // generates for the unlocked days. If everything's unlocked, skip the
+    // override (matches the previous full-reroll behavior).
+    const daysOverride = keepSet.size > 0
+      ? days.map(d => keptKeySet.has(`${d.weekOffset}-${d.slotIdx}`) ? { ...d, on: false } : d)
+      : null;
+
+    const currentPlanDinners = dinnerNamesOf(currentPerDay);
     // Exclusion for THIS reroll = persistent recent window + the dinners on
-    // the plan currently in front of the user. (The current plan's dinners
-    // may not be in recentDinners yet if the rolling window already capped
-    // them out — explicitly merging them guarantees the reroll produces
-    // something different from what's on screen.)
+    // the plan currently in front of the user. The kept dinners are also
+    // excluded — the picker shouldn't try to place a kept dinner on an
+    // unlocked day too (that would create a duplicate).
     const carryOver = [...new Set([...recentDinners, ...currentPlanDinners])];
+
     setRerollSeed(nextRerollSeed);
     setPickerSeed(nextPickerSeed);
     setLastConstraintKey(currentConstraintKey);
-    const perDay = await runPicker(nextPickerSeed, carryOver);
-    setRecentDinners(appendRecentDinners(recentDinners, [...currentPlanDinners, ...dinnerNamesOf(perDay)]));
-    setPreviewModal(prev => (prev ? { ...prev, perDay } : null));
+
+    const newPicks = await runPicker(nextPickerSeed, carryOver, daysOverride);
+
+    // Merge: kept entries + new picks for unlocked days. Sort calendar order.
+    const merged = [...keptEntries, ...(newPicks || [])].sort((a, b) => {
+      if (a.weekOffset !== b.weekOffset) return a.weekOffset - b.weekOffset;
+      return a.slotIdx - b.slotIdx;
+    });
+    setRecentDinners(appendRecentDinners(recentDinners, [...currentPlanDinners, ...dinnerNamesOf(newPicks)]));
+    setPreviewModal(prev => (prev ? { ...prev, perDay: merged } : null));
   };
 
   // Called when the user hits Confirm on the preview modal. Computes
