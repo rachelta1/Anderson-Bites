@@ -3381,11 +3381,12 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                         onClick={() => toggleKeep(slotKey)}
                         title={isKept ? 'Unlock — reroll will replace this dinner' : 'Keep this dinner when rerolling'}
                         style={{
-                          fontSize:12, cursor:'pointer', userSelect:'none',
-                          padding:'2px 8px', borderRadius:4,
+                          fontSize:15, fontWeight:600, cursor:'pointer', userSelect:'none',
+                          padding:'7px 14px', borderRadius:8,
                           background: isKept ? 'var(--purple-mid)' : 'transparent',
-                          border: `1px solid ${isKept ? 'var(--purple)' : 'var(--border)'}`,
+                          border: `1.5px solid ${isKept ? 'var(--purple)' : 'var(--border)'}`,
                           color: isKept ? 'var(--purple-light)' : 'var(--text-dimmer)',
+                          minHeight:34, display:'inline-flex', alignItems:'center', gap:4,
                         }}
                       >{isKept ? '🔒 keep' : '🔓 keep'}</span>
                     )}
@@ -5413,10 +5414,15 @@ function AutoPlanScreen({
   // modal, swaps perDay in place). Side-effects setGenLoading + setGenStatus.
   // excludeDinners: list of dinner names the user has already seen in earlier
   // reroll attempts of the same constraint session — picker filters them out.
-  // daysOverride: when partial-rerolling, pass a `days` array with kept slots
-  // toggled off so the picker only fills the unlocked days.
-  const runPicker = async (seed, excludeDinners = [], daysOverride = null) => {
-    const effDays = daysOverride || days;
+  // overrides: when partial-rerolling, callers can swap any of the picker's
+  // input lists: `days` (kept slots toggled off so the picker skips them),
+  // `breakfastPicks` (kept breakfasts removed so they aren't re-assigned to
+  // other days), or `tasks` (kept tasks turned off so they aren't placed
+  // twice). Anything omitted falls through to the live state.
+  const runPicker = async (seed, excludeDinners = [], overrides = {}) => {
+    const effDays = overrides.days || days;
+    const effBreakfastPicks = overrides.breakfastPicks || breakfastPicks;
+    const effTasks = overrides.tasks || tasks;
     const useLlm = !!(apiKey && instructions && instructions.trim());
     let perDay;
     let llmUsed = false;
@@ -5426,7 +5432,7 @@ function AutoPlanScreen({
       setGenStatus(seed > 1 ? '✦ Re-rolling…' : '✦ Asking Claude to honor your instructions…');
       try {
         perDay = await pickPlanWithLLM({
-          apiKey, recipeDB, days: effDays, breakfastPicks, tasks,
+          apiKey, recipeDB, days: effDays, breakfastPicks: effBreakfastPicks, tasks: effTasks,
           avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
           excludeDinners,
         });
@@ -5434,7 +5440,7 @@ function AutoPlanScreen({
       } catch (e) {
         llmFailureNote = `LLM picker failed (${e.message}); using rule-based`;
         perDay = pickPlan({
-          recipeDB, days: effDays, breakfastPicks, tasks,
+          recipeDB, days: effDays, breakfastPicks: effBreakfastPicks, tasks: effTasks,
           avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
           excludeDinners,
         });
@@ -5443,7 +5449,7 @@ function AutoPlanScreen({
       }
     } else {
       perDay = pickPlan({
-        recipeDB, days: effDays, breakfastPicks, tasks,
+        recipeDB, days: effDays, breakfastPicks: effBreakfastPicks, tasks: effTasks,
         avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
         excludeDinners,
       });
@@ -5543,12 +5549,30 @@ function AutoPlanScreen({
     const keptEntries = currentPerDay.filter(p => keepSet.has(`${p.weekOffset}-${p.slotIdx}`));
     const keptKeySet = new Set(keptEntries.map(p => `${p.weekOffset}-${p.slotIdx}`));
 
-    // Build a days array with kept slots toggled off so the picker only
-    // generates for the unlocked days. If everything's unlocked, skip the
-    // override (matches the previous full-reroll behavior).
-    const daysOverride = keepSet.size > 0
-      ? days.map(d => keptKeySet.has(`${d.weekOffset}-${d.slotIdx}`) ? { ...d, on: false } : d)
-      : null;
+    // Pull recipe/task names from kept slots so they don't get re-assigned
+    // to unlocked days. Without this, locking "pancakes Saturday" wouldn't
+    // stop the picker from putting pancakes on another day's breakfast.
+    const keptBreakfastNames = new Set();
+    const keptTaskNames = new Set();
+    keptEntries.forEach(p => {
+      const bfs = Array.isArray(p.breakfasts) ? p.breakfasts : (p.breakfast ? [p.breakfast] : []);
+      bfs.forEach(b => { if (b && b.name) keptBreakfastNames.add(b.name); });
+      (p.tasks || []).forEach(t => {
+        const name = typeof t === 'string' ? t : (t && t.name);
+        if (name) keptTaskNames.add(name);
+      });
+    });
+
+    // Build per-input overrides ONLY when something's locked — otherwise
+    // fall through to the full-reroll behavior. days: kept slots off.
+    // breakfastPicks: drop names already locked (so rotation can't re-emit
+    // them). tasks: turn off any task already placed on a locked day so
+    // the picker doesn't double-assign it.
+    const overrides = keepSet.size > 0 ? {
+      days: days.map(d => keptKeySet.has(`${d.weekOffset}-${d.slotIdx}`) ? { ...d, on: false } : d),
+      breakfastPicks: breakfastPicks.filter(b => b && !keptBreakfastNames.has(b)),
+      tasks: tasks.map(t => keptTaskNames.has(t.name) ? { ...t, on: false } : t),
+    } : {};
 
     const currentPlanDinners = dinnerNamesOf(currentPerDay);
     // Exclusion for THIS reroll = persistent recent window + the dinners on
@@ -5561,7 +5585,7 @@ function AutoPlanScreen({
     setPickerSeed(nextPickerSeed);
     setLastConstraintKey(currentConstraintKey);
 
-    const newPicks = await runPicker(nextPickerSeed, carryOver, daysOverride);
+    const newPicks = await runPicker(nextPickerSeed, carryOver, overrides);
 
     // Merge: kept entries + new picks for unlocked days. Sort calendar order.
     const merged = [...keptEntries, ...(newPicks || [])].sort((a, b) => {
