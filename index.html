@@ -1775,6 +1775,51 @@ function assignBreakfastsWithInstructions(dinnerDays, tasksByDt, activeBreakfast
    Returns { dinnerDays, breakfastByDt, tasksByDt, byName, dinnerCandidates, recent }.
    When `instructions` is provided, explicit user weekday assignments ("laundry
    thursday", "pancakes saturday") take priority over rule-based defaults. */
+// Effort tier for a planned day, used to gate dinner complexity:
+//   'breakfast' → day has any breakfast prep. Dinner MUST be Light (if any
+//                 Light is available). Cooking in the morning means no-fuss
+//                 dinner.
+//   'task'      → day has tasks (laundry/etc.) but NO breakfast. Dinner
+//                 should be Medium (Light acceptable as fallback). Heavy
+//                 is excluded — task days are already busy.
+//   'free'      → day has neither breakfast nor tasks. Dinner should be
+//                 Medium or Heavy — NEVER Light. Free days are reserved
+//                 for the more involved recipes.
+function effortTierFor(breakfasts, dayTasks) {
+  if (Array.isArray(breakfasts) && breakfasts.length > 0) return 'breakfast';
+  if (Array.isArray(dayTasks) && dayTasks.length > 0) return 'task';
+  return 'free';
+}
+
+// Whether a recipe's complexity satisfies the tier's hard constraint.
+// Used both as a filter (build the candidate pool) and as a validator
+// (reject the LLM's pick if it violates the tier).
+function tierAllowsComplexity(tier, complexity) {
+  if (tier === 'breakfast') return complexity === 'Light';
+  if (tier === 'task') return complexity === 'Light' || complexity === 'Medium';
+  if (tier === 'free') return complexity === 'Medium' || complexity === 'Heavy';
+  return true;
+}
+
+// Within a tier, rank complexities so the *preferred* complexity sorts first.
+// Lower number = better. Used as the primary sort key inside the picker so
+// e.g. on a 'task' day, Medium wins over Light when both are available.
+function tierComplexityRank(tier, complexity) {
+  if (tier === 'breakfast') return complexity === 'Light' ? 0 : 1;
+  if (tier === 'task') {
+    if (complexity === 'Medium') return 0;
+    if (complexity === 'Light') return 1;
+    return 2; // Heavy
+  }
+  if (tier === 'free') {
+    // Medium and Heavy are equally welcome on free days — let
+    // shuffle + used-count drive the choice between them.
+    if (complexity === 'Medium' || complexity === 'Heavy') return 0;
+    return 1; // Light (last resort if pool starves)
+  }
+  return 0;
+}
+
 function buildPlanContext({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions }) {
   const dinnerDays = days.filter(d => d.on);
   const activeBreakfasts = breakfastPicks.filter(p => p && p !== BREAKFAST_NONE);
@@ -1872,19 +1917,16 @@ async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, 
   const dayInfo = dinnerDays.map(d => {
     const dayBreakfasts = breakfastByDt[d.dt] || [];
     const defaultTasks = tasksByDt[d.dt] || [];
-    // Count effort sources on this day. EACH breakfast counts as 1 (so two
-    // breakfasts on the same day = 2 effort), each task counts as 1. Used to
-    // gate dinner complexity:
-    //   effortCount === 1  → preferLight (Light or Medium OK, no Heavy)
-    //   effortCount >= 2   → requireLight (Light mandatory if any available)
-    const effortCount = dayBreakfasts.length + defaultTasks.length;
-    const isFastDay = effortCount > 0;
-    const preferLight = effortCount >= 1;
-    const requireLight = effortCount >= 2;
+    // New tier model (replaces effortCount/preferLight/requireLight):
+    //   'breakfast' → REQUIRES Light dinner
+    //   'task'      → REQUIRES Medium dinner (Light fallback if no Medium)
+    //   'free'      → REQUIRES Medium or Heavy dinner (NEVER Light)
+    const tier = effortTierFor(dayBreakfasts, defaultTasks);
     return {
       dt: d.dt, weekday: d.d,
       breakfastPrep: dayBreakfasts.length ? dayBreakfasts : null,
-      defaultTasks, effortCount, isFastDay, preferLight, requireLight,
+      defaultTasks,
+      tier,
     };
   });
 
@@ -1893,18 +1935,17 @@ async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, 
   const system = `You assign dinners AND household tasks to days for a household meal planner. Honor the user's custom instructions strictly.
 
 For each day, return ONE dinner (by exact name from the library) and a list of tasks. Constraints:
-(1) days marked isFastDay MUST get a recipe with isFast=true if any are available;
-(2) avoid recipes in the recentlyCooked list;
-(3) do not repeat a dinner within the plan;
-(4) prefer recipes with lower 'used' count when other constraints tie;
-(5) if the user instructions specify a protein/recipe for a specific weekday, prioritize that above all else (it overrides isFastDay);
-(6) defaultTasks and breakfastPrep are PRE-ASSIGNED for each day, already honoring any explicit weekday the user gave (e.g. "laundry thursday", "pancakes saturday", or "pancakes and muffins same day"). breakfastPrep may be null OR an array of breakfast names (multiple if the user asked for two on the same day). Echo defaultTasks back as the day's tasks unless the user's instructions add or move something. Each active task should land on at most one day across the plan.
-(7) effortCount on each day = breakfastPrep array length + number of tasks. Use it to gate dinner complexity:
-    - effortCount === 0: any complexity is fine.
-    - effortCount === 1 (preferLight=true): Light or Medium dinner only — never Heavy.
-    - effortCount >= 2 (requireLight=true): Light dinner is MANDATORY if any Light recipe is available in the library. Never Medium or Heavy on these days. These are the user's hardest days (e.g. pancakes prep + laundry, or two tasks together).
-(8) spread the load: don't pile multiple effort sources on one day if other days are empty. If a user-requested specific dinner (e.g. "pasta one night") would land on a requireLight day, prefer to put it on a DIFFERENT, lighter day instead.
-(9) PROTEIN CAPS are HARD limits. The user prompt includes a PROTEIN_CAPS object listing maximum dinners per protein (e.g. {"chicken": 1} means AT MOST one chicken dinner across the entire plan; {"fish": 0} means zero fish dinners). NEVER exceed these caps. If the user says "chicken one night only" and the cap is 1, exactly zero or one of your picks may have the chicken tag (turkey counts as chicken). When choosing recipes, count the protein tags as you go and stop reaching for that protein once you hit the cap.${rerollSeed > 1 ? `\n(10) THIS IS A RE-ROLL (attempt #${rerollSeed}). The user already saw plan(s) with these same constraints and wants DIFFERENT recipes this time. The DINNER LIBRARY below has already been filtered to remove recipes shown in earlier attempts — pick freely from it without trying to recreate a previous plan. Keep all hard constraints (1-9) intact. Within the candidate list, favor variety: don't gravitate to the same protein/cuisine cluster on every reroll.` : ''}
+(1) avoid recipes in the recentlyCooked list;
+(2) do not repeat a dinner within the plan;
+(3) prefer recipes with lower 'used' count when other constraints tie;
+(4) if the user instructions specify a protein/recipe for a specific weekday, prioritize that above all else (it overrides tier preferences);
+(5) defaultTasks and breakfastPrep are PRE-ASSIGNED for each day, already honoring any explicit weekday the user gave (e.g. "laundry thursday", "pancakes saturday", or "pancakes and muffins same day"). breakfastPrep may be null OR an array of breakfast names (multiple if the user asked for two on the same day). Echo defaultTasks back as the day's tasks unless the user's instructions add or move something. Each active task should land on at most one day across the plan.
+(6) Each day has a tier field that gates dinner complexity. These are HARD rules — always respect them when an eligible recipe exists:
+    - tier === 'breakfast' (day has breakfast prep): dinner MUST be complexity=Light. Cooking in the morning means a no-fuss dinner.
+    - tier === 'task' (day has tasks like laundry, NO breakfast): dinner SHOULD be complexity=Medium. If no Medium is available, Light is acceptable. NEVER Heavy.
+    - tier === 'free' (no breakfast, no tasks): dinner MUST be complexity=Medium OR Heavy. NEVER Light. Free days are reserved for the more involved dishes.
+(7) spread the load: don't pile multiple effort sources on one day if other days are empty. If a user-requested specific dinner (e.g. "pasta one night") would land on a tier='breakfast' day, prefer to put it on a DIFFERENT day instead.
+(8) PROTEIN CAPS are HARD limits. The user prompt includes a PROTEIN_CAPS object listing maximum dinners per protein (e.g. {"chicken": 1} means AT MOST one chicken dinner across the entire plan; {"fish": 0} means zero fish dinners). NEVER exceed these caps. If the user says "chicken one night only" and the cap is 1, exactly zero or one of your picks may have the chicken tag (turkey counts as chicken). When choosing recipes, count the protein tags as you go and stop reaching for that protein once you hit the cap.${rerollSeed > 1 ? `\n(9) THIS IS A RE-ROLL (attempt #${rerollSeed}). The user already saw plan(s) with these same constraints and wants DIFFERENT recipes this time. The DINNER LIBRARY below has already been filtered to remove recipes shown in earlier attempts — pick freely from it without trying to recreate a previous plan. Keep all hard constraints (1-8) intact. Within the candidate list, favor variety: don't gravitate to the same protein/cuisine cluster on every reroll.` : ''}
 
 Return ONLY JSON, no prose, no markdown.`;
 
@@ -1993,42 +2034,29 @@ Return ONLY JSON, no prose, no markdown.`;
     const breakfasts = breakfastNames.map(n => byName[n] || { name: n });
     const breakfast = breakfasts[0] || null; // back-compat: first breakfast
     const dayTasks = tasksByDtLlm[day.dt] || [];
-    const effortCount = breakfasts.length + dayTasks.length;
-    const isFast = effortCount > 0;
-    const preferLight = effortCount >= 1;
-    const requireLight = effortCount >= 2;
+    const tier = effortTierFor(breakfasts, dayTasks);
+    // isFast retained on the result row only for downstream display/stats —
+    // the new tier model handles complexity gating directly.
+    const isFast = tier !== 'free';
 
-    // Validate the LLM's per-day pick against the day's hard constraints.
-    // The LLM is told (in the system prompt) about isFast / preferLight /
-    // requireLight gating, but it sometimes ignores those rules anyway. If the
-    // LLM picked Heavy on a day with a breakfast, or non-fast on an effort
-    // day, fall through to the rule-based fallback for that day so the gates
-    // are actually enforced. "Acceptable if no alternative exists" rule:
-    // we only reject if a constraint-satisfying alternative is available in
-    // the effective pool — better a constraint violation than no dinner.
+    // Validate the LLM's per-day pick against the day's tier constraint.
+    // The LLM is told about tiers in the system prompt but sometimes
+    // ignores them — fall through to the rule-based fallback when the
+    // tier rule is violated AND a tier-satisfying alternative exists.
     const validateRequest = (recipe) => {
       if (!recipe) return false;
       if (usedThisRun.has(recipe.name)) return false;
       // Exclusion: if we filtered the candidate pool for the LLM, anything
       // outside it is a violation of the user's reroll request.
       if (usingExclusion && excludeSet.has(recipe.name)) return false;
-      // isFast gate
-      if (isFast && !isFastRecipe(recipe)) {
-        const anyFast = effectiveCandidates.some(r => isFastRecipe(r) && !usedThisRun.has(r.name));
-        if (anyFast) return false;
-      }
-      // requireLight gate (effortCount >= 2): must be Light if any Light available
-      if (requireLight && recipe.complexity !== 'Light') {
-        const anyLight = effectiveCandidates.some(r =>
-          r.complexity === 'Light' && !usedThisRun.has(r.name) && (!isFast || isFastRecipe(r))
+      // Tier gate. If the recipe doesn't satisfy the tier but the pool
+      // still has something that does, reject the LLM pick so the fallback
+      // chooses a tier-satisfying alternative.
+      if (!tierAllowsComplexity(tier, recipe.complexity)) {
+        const anyTierFit = effectiveCandidates.some(r =>
+          tierAllowsComplexity(tier, r.complexity) && !usedThisRun.has(r.name)
         );
-        if (anyLight) return false;
-      } else if (preferLight && recipe.complexity === 'Heavy') {
-        // preferLight gate (effortCount >= 1): no Heavy if any non-Heavy available
-        const anyNonHeavy = effectiveCandidates.some(r =>
-          r.complexity !== 'Heavy' && !usedThisRun.has(r.name) && (!isFast || isFastRecipe(r))
-        );
-        if (anyNonHeavy) return false;
+        if (anyTierFit) return false;
       }
       return true;
     };
@@ -2040,50 +2068,35 @@ Return ONLY JSON, no prose, no markdown.`;
       pick = requestedRecipe;
     } else {
       if (requestedRecipe) {
-        // The LLM's pick violated a hard constraint; the fallback will choose
-        // a constraint-satisfying alternative. Logged so the rejection has a
-        // fingerprint if anyone wonders why a different dinner showed up.
-        console.warn(`[pickPlanWithLLM] rejected LLM pick "${requested}" for ${day.dt} (complexity=${requestedRecipe.complexity}, isFast=${isFastRecipe(requestedRecipe)}; day requireLight=${requireLight}, preferLight=${preferLight}, isFast=${isFast})`);
+        console.warn(`[pickPlanWithLLM] rejected LLM pick "${requested}" for ${day.dt} (complexity=${requestedRecipe.complexity}, day tier=${tier})`);
       }
-      // Fallback: rule-based pick honoring constraints. requireLight days only
-      // accept Light if any Light is available; preferLight days accept Light
-      // or Medium; otherwise no complexity preference. Honors the reroll
-      // exclusion: prefers excluded-aware pool, falls back to full pool only
-      // if that empties.
-      const fits = (r) => !usedThisRun.has(r.name) && (!isFast || isFastRecipe(r));
+      // Fallback: rule-based pick honoring the tier constraint.
+      const fits = (r) => !usedThisRun.has(r.name);
       const tier1 = effectiveCandidates.filter(r => !recent.has(r.name) && fits(r));
       const tier2 = tier1.length ? tier1 : effectiveCandidates.filter(fits);
       const pool = tier2.length
         ? tier2
-        : (effectiveCandidates.filter(r => !usedThisRun.has(r.name)).length
-            ? effectiveCandidates.filter(r => !usedThisRun.has(r.name))
-            : dinnerCandidates.filter(r => !usedThisRun.has(r.name)));
-      // requireLight: hard-filter to Light-only when any Light exists in pool
-      let workingPool = pool;
-      if (requireLight) {
-        const lights = pool.filter(r => r.complexity === 'Light');
-        if (lights.length) workingPool = lights;
-      } else if (preferLight) {
-        // Drop Heavy when at least one non-Heavy is available
-        const nonHeavy = pool.filter(r => r.complexity !== 'Heavy');
-        if (nonHeavy.length) workingPool = nonHeavy;
-      }
+        : (effectiveCandidates.filter(fits).length
+            ? effectiveCandidates.filter(fits)
+            : dinnerCandidates.filter(fits));
+      // Hard-filter to tier-allowed complexities when any are available.
+      // Otherwise fall through to the full pool (better a constraint
+      // violation than no dinner).
+      const tierFits = pool.filter(r => tierAllowsComplexity(tier, r.complexity));
+      const workingPool = tierFits.length ? tierFits : pool;
       // Shuffle first so re-rolls vary tie-breaks; sort is stable so the
-      // complexity / used-count preferences still win when they differ.
+      // tier preference + used-count preferences still win when they differ.
       const shuffled = seededShuffle(workingPool, rerollSeed * 31 + dayIdx + 1);
       const sorted = shuffled.sort((a, b) => {
-        if (preferLight) {
-          const rank = (c) => c === 'Light' ? 0 : c === 'Heavy' ? 2 : 1;
-          const ra = rank(a.complexity);
-          const rb = rank(b.complexity);
-          if (ra !== rb) return ra - rb;
-        }
+        const ra = tierComplexityRank(tier, a.complexity);
+        const rb = tierComplexityRank(tier, b.complexity);
+        if (ra !== rb) return ra - rb;
         return (a.used || 0) - (b.used || 0);
       });
       pick = sorted[0] || null;
     }
     if (pick) usedThisRun.add(pick.name);
-    return { ...day, dinner: pick, breakfast, breakfasts, tasks: dayTasks, isFast };
+    return { ...day, dinner: pick, breakfast, breakfasts, tasks: dayTasks, isFast, tier };
   });
 
   // Post-validation: enforce protein caps from the user's instructions.
@@ -2091,8 +2104,7 @@ Return ONLY JSON, no prose, no markdown.`;
   // but it sometimes ignores them — especially with reroll variety pressure
   // or when one protein dominates the candidate pool. We count dinners by
   // protein tag, and for each over-budget protein swap excess picks with
-  // non-conflicting alternatives that still satisfy the day's gates
-  // (isFast / preferLight / requireLight / exclusion).
+  // non-conflicting alternatives that still satisfy the day's tier gate.
   if (Object.keys(proteinCaps).length) {
     const counts = {};
     const indicesByProtein = {}; // tag → [resultIdx, ...]
@@ -2104,14 +2116,7 @@ Return ONLY JSON, no prose, no markdown.`;
       indicesByProtein[t].push(i);
     });
 
-    const dayGates = (slot) => {
-      const effortCount = (slot.breakfasts || []).length + (slot.tasks || []).length;
-      return {
-        isFast: effortCount > 0,
-        preferLight: effortCount >= 1,
-        requireLight: effortCount >= 2,
-      };
-    };
+    const dayTier = (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks);
 
     for (const [tag, max] of Object.entries(proteinCaps)) {
       while ((counts[tag] || 0) > max) {
@@ -2120,7 +2125,7 @@ Return ONLY JSON, no prose, no markdown.`;
         const dayIdx = (indicesByProtein[tag] || []).pop();
         if (dayIdx === undefined) break;
         const slot = result[dayIdx];
-        const gates = dayGates(slot);
+        const tier = dayTier(slot);
 
         const replacement = effectiveCandidates.find(r => {
           if (!r) return false;
@@ -2130,9 +2135,8 @@ Return ONLY JSON, no prose, no markdown.`;
           // Don't introduce a new violation: if this candidate's protein is
           // ALSO capped and already at-or-over budget, skip it.
           if (rTag && proteinCaps[rTag] !== undefined && (counts[rTag] || 0) >= proteinCaps[rTag]) return false;
-          if (gates.isFast && !isFastRecipe(r)) return false;
-          if (gates.requireLight && r.complexity !== 'Light') return false;
-          if (gates.preferLight && r.complexity === 'Heavy') return false;
+          // Tier gate: replacement must match the day's tier constraint.
+          if (!tierAllowsComplexity(tier, r.complexity)) return false;
           return true;
         });
 
@@ -2209,44 +2213,38 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
     const breakfasts = breakfastNames.map(n => byName[n] || { name: n });
     const breakfast = breakfasts[0] || null; // back-compat
     const dayTasks = tasksByDt[day.dt] || [];
-    // Effort gate: 1 source = Light or Medium; 2+ sources = Light required.
-    const effortCount = breakfasts.length + dayTasks.length;
-    const isFast = effortCount > 0;
-    const preferLight = effortCount >= 1;
-    const requireLight = effortCount >= 2;
+    // Tier model (replaces effortCount/preferLight/requireLight):
+    //   'breakfast' → Light required
+    //   'task'      → Medium preferred (Light fallback), no Heavy
+    //   'free'      → Medium or Heavy required (no Light)
+    const tier = effortTierFor(breakfasts, dayTasks);
+    const isFast = tier !== 'free';
 
-    const fits = (r) => !usedThisRun.has(r.name) && (!isFast || isFastRecipe(r));
-    const tier1 = effectiveCandidates.filter(r => !recent.has(r.name) && fits(r));
-    const tier2 = tier1.length ? tier1 : effectiveCandidates.filter(fits);
-    const pool = tier2.length
-      ? tier2
-      : (effectiveCandidates.filter(r => !usedThisRun.has(r.name)).length
-          ? effectiveCandidates.filter(r => !usedThisRun.has(r.name))
-          : dinnerCandidates.filter(r => !usedThisRun.has(r.name)));
-    let workingPool = pool;
-    if (requireLight) {
-      const lights = pool.filter(r => r.complexity === 'Light');
-      if (lights.length) workingPool = lights;
-    } else if (preferLight) {
-      const nonHeavy = pool.filter(r => r.complexity !== 'Heavy');
-      if (nonHeavy.length) workingPool = nonHeavy;
-    }
+    const fits = (r) => !usedThisRun.has(r.name);
+    const stage1 = effectiveCandidates.filter(r => !recent.has(r.name) && fits(r));
+    const stage2 = stage1.length ? stage1 : effectiveCandidates.filter(fits);
+    const pool = stage2.length
+      ? stage2
+      : (effectiveCandidates.filter(fits).length
+          ? effectiveCandidates.filter(fits)
+          : dinnerCandidates.filter(fits));
+    // Hard-filter to tier-allowed complexities when any are available.
+    // Otherwise fall through to the full pool (better than no dinner).
+    const tierFits = pool.filter(r => tierAllowsComplexity(tier, r.complexity));
+    const workingPool = tierFits.length ? tierFits : pool;
     // Seeded shuffle gives ties a different order on re-roll. Stable sort
-    // preserves complexity / used-count preferences when they differ.
+    // preserves tier + used-count preferences when they differ.
     const shuffled = seededShuffle(workingPool, rerollSeed * 31 + dayIdx + 1);
     const sorted = shuffled.sort((a, b) => {
-      if (preferLight) {
-        const rank = (c) => c === 'Light' ? 0 : c === 'Heavy' ? 2 : 1;
-        const ra = rank(a.complexity);
-        const rb = rank(b.complexity);
-        if (ra !== rb) return ra - rb;
-      }
+      const ra = tierComplexityRank(tier, a.complexity);
+      const rb = tierComplexityRank(tier, b.complexity);
+      if (ra !== rb) return ra - rb;
       return (a.used || 0) - (b.used || 0);
     });
     const pick = sorted[0] || null;
     if (pick) usedThisRun.add(pick.name);
 
-    return { ...day, dinner: pick, breakfast, breakfasts, tasks: dayTasks, isFast };
+    return { ...day, dinner: pick, breakfast, breakfasts, tasks: dayTasks, isFast, tier };
   });
 }
 
