@@ -1,6 +1,6 @@
 {
   "name": "Anderson Bites",
-  "short_name": "Bites",
+  "short_name": "AndersonBites",
   "description": "Personal meal planner — recipe library, weekly plan, autoplan, and grocery list.",
   "start_url": "./",
   "scope": "./",
