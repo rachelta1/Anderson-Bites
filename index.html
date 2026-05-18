@@ -208,6 +208,13 @@ body {
 .meal-slot-name { font-size: 21px; color: #ddd; }
 .meal-slot-meta { font-size: 16px; color: var(--text-dimmer); }
 .meal-slot-edit { font-size: 15px; color: #444; margin-left: auto; }
+.meal-slot-move {
+  font-size: 15px; line-height: 1;
+  color: #555;
+  padding: 2px 6px; margin-left: 4px;
+  border-radius: 6px; cursor: pointer;
+}
+.meal-slot-move:active { background: #1a1428; color: var(--purple-light); }
 .meal-slot-del {
   font-size: 22px; line-height: 1;
   color: #555;
@@ -2831,6 +2838,50 @@ function TaskSheet({ initial, onSave, onClose }) {
   );
 }
 
+/* ── Move-to-day picker ── */
+function MoveDaySheet({ weekData, currentIdx, mealName, onMove, onClose }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()}>
+        <div className="modal-grabber" />
+        <div className="modal-header">
+          <div className="modal-title">Move to…</div>
+          <span className="modal-close" onClick={onClose}>×</span>
+        </div>
+        <div style={{ fontSize:15, color:'var(--text-dim)', padding:'0 2px 12px' }}>
+          {mealName}
+        </div>
+        <div style={{ display:'flex', gap:6, padding:'0 2px 14px' }}>
+          {weekData.map((d, i) => {
+            const disabled = i === currentIdx;
+            return (
+              <div
+                key={i}
+                className="day-chip"
+                onClick={disabled ? null : () => onMove(i)}
+                style={{
+                  flex:'1 1 0',
+                  minWidth:0,
+                  background: d.today ? '#1a1228' : '#111118',
+                  border: `1.5px solid ${d.today ? '#3b1f70' : 'var(--border)'}`,
+                  opacity: disabled ? 0.3 : 1,
+                  cursor: disabled ? 'default' : 'pointer',
+                }}
+              >
+                <span style={{ fontSize:14, color: d.today ? '#6d44b0' : 'var(--text-dim)' }}>{d.d}</span>
+                <span style={{ fontSize:22, fontWeight:600, color: d.today ? '#ccc' : '#888' }}>{d.n}</span>
+                {dayHasContent(d) && (
+                  <span style={{ width:4, height:4, borderRadius:'50%', background:'var(--purple)', display:'block' }} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Initial week 0 (seeded with mocked plan) ── */
 function seedWeekZero() {
   const w = buildWeek(0);
@@ -2914,6 +2965,58 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
     });
   };
 
+  // Move a meal from the currently-selected day to a different day in the
+  // same week. Dinner falls back to extras if the target day already has
+  // dinner (matches the existing `auto` slot behavior). Follows the meal
+  // to its new day so the user sees the result.
+  const moveMeal = (slot, targetIdx) => {
+    if (targetIdx === selected) { setModal(null); return; }
+    const sourceDay = weekData[selected];
+    if (!sourceDay) { setModal(null); return; }
+    const srcB = Array.isArray(sourceDay.meals.b) ? sourceDay.meals.b : [];
+    let recipeName, mealType;
+    if (slot && typeof slot === 'object' && slot.kind === 'b') {
+      recipeName = srcB[slot.idx]; mealType = 'b';
+    } else if (slot === 'd') {
+      recipeName = sourceDay.meals.d; mealType = 'd';
+    } else if (typeof slot === 'number') {
+      recipeName = (sourceDay.meals.snacks || [])[slot]; mealType = 'snack';
+    }
+    if (!recipeName) { setModal(null); return; }
+
+    const next = weekData.map((d, i) => {
+      const draft = {
+        ...d,
+        meals: {
+          ...d.meals,
+          b: Array.isArray(d.meals.b) ? [...d.meals.b] : (d.meals.b ? [d.meals.b] : []),
+          snacks: [...(d.meals.snacks || [])],
+        },
+        tasks: [...(d.tasks || [])],
+      };
+      if (i === selected) {
+        if (mealType === 'b') draft.meals.b.splice(slot.idx, 1);
+        else if (mealType === 'd') draft.meals.d = null;
+        else if (mealType === 'snack') draft.meals.snacks.splice(slot, 1);
+        if (!dayHasContent(draft)) draft.planned = false;
+      } else if (i === targetIdx) {
+        if (mealType === 'b') draft.meals.b.push(recipeName);
+        else if (mealType === 'd') {
+          if (!draft.meals.d) draft.meals.d = recipeName;
+          else draft.meals.snacks.push(recipeName);
+        } else if (mealType === 'snack') {
+          draft.meals.snacks.push(recipeName);
+        }
+      }
+      return draft;
+    });
+    setWeekData(next);
+    setSelected(targetIdx);
+    setModal(null);
+  };
+
+  const openMove = (slot, mealName) => setModal({ type:'move', slot, mealName });
+
   const saveTask = (text) => {
     const idx = modal?.taskIdx;
     updateDay(d => {
@@ -2995,6 +3098,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
               <div className="meal-slot-meta">Breakfast · tap for recipe</div>
             </div>
             <span className="meal-slot-edit" title="swap recipe" onClick={(e) => { e.stopPropagation(); openMeal({ kind:'b', idx: bi }); }}>✎</span>
+            <span className="meal-slot-move" title="move to another day" onClick={(e) => { e.stopPropagation(); openMove({ kind:'b', idx: bi }, bName); }}>📅</span>
             <span className="meal-slot-del" onClick={(e) => { e.stopPropagation(); deleteMeal({ kind:'b', idx: bi }); }}>×</span>
           </div>
         ))}
@@ -3007,6 +3111,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
               <div className="meal-slot-meta">Dinner · tap for recipe</div>
             </div>
             <span className="meal-slot-edit" title="swap recipe" onClick={(e) => { e.stopPropagation(); openMeal('d'); }}>✎</span>
+            <span className="meal-slot-move" title="move to another day" onClick={(e) => { e.stopPropagation(); openMove('d', day.meals.d); }}>📅</span>
             <span className="meal-slot-del" onClick={(e) => { e.stopPropagation(); deleteMeal('d'); }}>×</span>
           </div>
         )}
@@ -3020,6 +3125,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
               <div className="meal-slot-meta">Extra meal · tap for recipe</div>
             </div>
             <span className="meal-slot-edit" title="swap recipe" onClick={(e) => { e.stopPropagation(); setModal({ type:'recipe', slot:i }); }}>✎</span>
+            <span className="meal-slot-move" title="move to another day" onClick={(e) => { e.stopPropagation(); openMove(i, s); }}>📅</span>
             <span className="meal-slot-del" onClick={(e) => { e.stopPropagation(); deleteMeal(i); }}>×</span>
           </div>
         ))}
@@ -3078,6 +3184,15 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
         <TaskSheet
           initial={modal.initial}
           onSave={saveTask}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.type === 'move' && (
+        <MoveDaySheet
+          weekData={weekData}
+          currentIdx={selected}
+          mealName={modal.mealName}
+          onMove={(targetIdx) => moveMeal(modal.slot, targetIdx)}
           onClose={() => setModal(null)}
         />
       )}
