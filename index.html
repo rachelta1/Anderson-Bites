@@ -4746,6 +4746,34 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     setTimeout(() => setToast(''), 2000);
   };
 
+  // Ingredient editing — fix/add/remove raw ingredient lines (with qty).
+  // Drafted as a flat array of strings like "2 lbs salmon"; on save we
+  // re-derive `ingredients` (names only) via parseItem so both shapes
+  // stay in sync with the rest of the app (grocery merging, etc.).
+  const [editingIng, setEditingIng] = useState(false);
+  const [draftIng, setDraftIng] = useState([]);
+  const startEditIng = () => {
+    const hasRaw = Array.isArray(r.ingredientsWithQty) && r.ingredientsWithQty.length === ingredients.length;
+    setDraftIng(hasRaw ? [...r.ingredientsWithQty] : ingredients.map(n => n || ''));
+    setEditingIng(true);
+  };
+  const cancelEditIng = () => { setEditingIng(false); setDraftIng([]); };
+  const saveEditIng = () => {
+    if (!setRecipeDB || !r.id) { setEditingIng(false); return; }
+    const clean = draftIng.map(s => (s || '').trim()).filter(Boolean);
+    const newNames = clean.map(s => (parseItem(s).n || s).trim());
+    setRecipeDB(prev => prev.map(x => x.id === r.id
+      ? { ...x, ingredients: newNames, ingredientsWithQty: clean }
+      : x));
+    setEditingIng(false);
+    setDraftIng([]);
+    setToast('Ingredients saved');
+    setTimeout(() => setToast(''), 1800);
+  };
+  const updateIngLine = (i, val) => setDraftIng(prev => prev.map((s, idx) => idx === i ? val : s));
+  const deleteIngLine = (i) => setDraftIng(prev => prev.filter((_, idx) => idx !== i));
+  const addIngLine = () => setDraftIng(prev => [...prev, '']);
+
   // Segmented Ingredients/Steps toggle. Inlined as a variable so both
   // branches of the layout can render the same component without duplication.
   const tabToggle = (
@@ -4857,33 +4885,86 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
               {tabToggle}
               {notesBlock}
 
-              <div className="section-label" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <div className="section-label" style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:6 }}>
                 <span>Ingredients</span>
-                {ingredients.length > 0 && setGroceryList && (() => {
-                  const missing = ingredients.filter(ing => !groceryNames.has((ing || '').toLowerCase()));
-                  const allOnList = missing.length === 0;
-                  return (
-                    <span
-                      onClick={() => {
-                        if (allOnList) {
-                          // Remove all of this recipe's ingredients from grocery list
-                          ingredients.forEach((_, i) => toggleIng(i));
-                          setToast(`Removed ${ingredients.length} from grocery list`);
-                          setTimeout(() => setToast(''), 1800);
-                        } else {
-                          // Add only the missing ones
-                          ingredients.forEach((ing, i) => {
-                            if (!groceryNames.has((ing || '').toLowerCase())) toggleIng(i);
-                          });
-                          setToast(`Added ${missing.length} to grocery list`);
-                          setTimeout(() => setToast(''), 1800);
-                        }
-                      }}
-                      style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
-                    >{allOnList ? 'Remove all' : 'Add all'}</span>
-                  );
-                })()}
+                <div style={{ display:'flex', gap:6 }}>
+                  {editingIng ? (
+                    <>
+                      <span
+                        onClick={cancelEditIng}
+                        style={{ fontSize:12, color:'var(--text-dimmer)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--border)', borderRadius:4 }}
+                      >Cancel</span>
+                      <span
+                        onClick={saveEditIng}
+                        style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
+                      >Save</span>
+                    </>
+                  ) : (
+                    <>
+                      {setRecipeDB && r.id && (
+                        <span
+                          onClick={startEditIng}
+                          style={{ fontSize:12, color:'var(--text-dim)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--border)', borderRadius:4 }}
+                        >✎ Edit</span>
+                      )}
+                      {ingredients.length > 0 && setGroceryList && (() => {
+                        const missing = ingredients.filter(ing => !groceryNames.has((ing || '').toLowerCase()));
+                        const allOnList = missing.length === 0;
+                        return (
+                          <span
+                            onClick={() => {
+                              if (allOnList) {
+                                ingredients.forEach((_, i) => toggleIng(i));
+                                setToast(`Removed ${ingredients.length} from grocery list`);
+                                setTimeout(() => setToast(''), 1800);
+                              } else {
+                                ingredients.forEach((ing, i) => {
+                                  if (!groceryNames.has((ing || '').toLowerCase())) toggleIng(i);
+                                });
+                                setToast(`Added ${missing.length} to grocery list`);
+                                setTimeout(() => setToast(''), 1800);
+                              }
+                            }}
+                            style={{ fontSize:12, color:'var(--purple-light)', cursor:'pointer', textTransform:'none', letterSpacing:0, padding:'2px 10px', border:'1px solid var(--purple-bg)', borderRadius:4 }}
+                          >{allOnList ? 'Remove all' : 'Add all'}</span>
+                        );
+                      })()}
+                    </>
+                  )}
+                </div>
               </div>
+              {editingIng ? (
+                <>
+                  {draftIng.map((line, i) => (
+                    <div key={i} style={{ display:'flex', gap:8, padding:'6px 0', alignItems:'center' }}>
+                      <input
+                        value={line}
+                        onChange={e => updateIngLine(i, e.target.value)}
+                        placeholder='e.g. "2 lbs salmon"'
+                        style={{
+                          flex:1, background:'#0f0f18', border:'1.5px solid var(--border)',
+                          borderRadius:8, padding:'8px 10px', color:'var(--text)',
+                          fontFamily:'var(--font)', fontSize:16, outline:'none',
+                        }}
+                      />
+                      <span
+                        onClick={() => deleteIngLine(i)}
+                        style={{ fontSize:22, color:'#666', cursor:'pointer', padding:'2px 8px', borderRadius:6, lineHeight:1 }}
+                        title="Remove"
+                      >×</span>
+                    </div>
+                  ))}
+                  <div
+                    onClick={addIngLine}
+                    style={{
+                      marginTop:6, padding:'10px 12px', textAlign:'center',
+                      border:'1px dashed var(--border-dim)', borderRadius:8,
+                      color:'var(--text-dim)', fontSize:14, cursor:'pointer',
+                    }}
+                  >+ Add ingredient</div>
+                </>
+              ) : (
+              <>
               {ingredients.length === 0 && (
                 <div style={{ fontSize:13, color:'var(--text-dimmer)', padding:'6px 0' }}>No ingredients recorded.</div>
               )}
@@ -4932,6 +5013,8 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                   </div>
                 );
               })}
+              </>
+              )}
 
               <div style={{ height:12 }} />
             </div>
