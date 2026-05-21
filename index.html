@@ -643,6 +643,11 @@ function snapshotLocal() {
   return out;
 }
 
+// Counter for failed pushes — drives retry backoff. Reset on success.
+let pushFailures = 0;
+let pushRetryTimer = null;
+const PUSH_RETRY_DELAYS = [5000, 15000, 60000, 300000]; // 5s, 15s, 1m, 5m
+
 async function pushNow(opts = {}) {
   const { internal = false } = opts;
   if (!currentUser) return;
@@ -663,8 +668,26 @@ async function pushNow(opts = {}) {
     });
     origSetItem('ab.lastSync', String(ts));
     console.log('[AB sync] pushed', Object.keys(data).length, 'keys');
+    pushFailures = 0;
+    if (pushRetryTimer) { clearTimeout(pushRetryTimer); pushRetryTimer = null; }
   } catch (e) {
     console.warn('[AB sync] push failed', e);
+    // Retry with exponential backoff. Without this, a single transient
+    // network blip silently leaves cloud stale — which is exactly the
+    // failure mode that caused husband-phone-sync to miss her data.
+    if (pushFailures < PUSH_RETRY_DELAYS.length) {
+      const delay = PUSH_RETRY_DELAYS[pushFailures];
+      pushFailures++;
+      if (pushRetryTimer) clearTimeout(pushRetryTimer);
+      pushRetryTimer = setTimeout(() => {
+        pushRetryTimer = null;
+        pushNow(opts);
+      }, delay);
+      console.log('[AB sync] will retry push in ' + (delay / 1000) + 's (attempt ' + pushFailures + '/' + PUSH_RETRY_DELAYS.length + ')');
+    } else {
+      console.warn('[AB sync] push retry exhausted after ' + PUSH_RETRY_DELAYS.length + ' attempts — manual recovery may be needed');
+      pushFailures = 0; // Reset so the next user edit gets fresh retry budget.
+    }
   }
 }
 
@@ -824,6 +847,28 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', flushPush);
 window.addEventListener('beforeunload', flushPush);
 
+// Heartbeat: while the app is open + visible + signed in, push local state
+// to cloud every 5 minutes. Cheap insurance against any silent push failure
+// (transient network blip, mid-edit reload that beat the flush, etc.) so
+// cloud is never more than ~5 minutes stale when the app is in use. Only
+// fires if we've made local edits since the last successful push.
+const HEARTBEAT_MS = 5 * 60 * 1000;
+setInterval(() => {
+  if (document.hidden) return;
+  if (!currentUser || !initialPullDone || pulling) return;
+  // Skip the heartbeat if a debounced push is already queued — it'll cover
+  // the same ground.
+  if (pushTimer) return;
+  // Skip if a retry timer is queued — we're already trying to recover.
+  if (pushRetryTimer) return;
+  const lastSync = parseInt(localStorage.getItem('ab.lastSync') || '0', 10);
+  // Only push if local likely has unsynced changes (we haven't pushed
+  // recently). Avoids wasting Firestore writes when the app sits idle.
+  if (Date.now() - lastSync < HEARTBEAT_MS) return;
+  console.log('[AB sync] heartbeat push');
+  pushNow();
+}, HEARTBEAT_MS);
+
 window.AB_FB = {
   ready: true,
   getUser: () => currentUser,
@@ -855,8 +900,15 @@ window.AB_FB = {
   // Diagnostic: returns sync state for the UI to display.
   status: () => ({
     user: currentUser ? currentUser.email : null,
+    uid: currentUser ? currentUser.uid : null,
+    // First 8 chars of UID — long enough to compare visually across two
+    // devices without showing the whole 28-char string in the UI.
+    uidShort: currentUser ? currentUser.uid.substring(0, 8) : null,
     initialPullDone,
     pulling,
+    pushPending: !!pushTimer,
+    pushRetrying: !!pushRetryTimer,
+    pushFailures,
     localKeys: Object.keys(snapshotLocal()).length,
     localBytes: Object.values(snapshotLocal()).reduce((acc, v) => acc + ((v || '').length || 0), 0),
     lastSync: parseInt(localStorage.getItem('ab.lastSync') || '0', 10),
@@ -4010,6 +4062,42 @@ function SyncRecoveryButton({ onMsg }) {
   );
 }
 
+// Tiny status strip under the "Signed in as" line. Shows:
+//   - First 8 chars of the user's Firebase UID (so you can compare two
+//     devices visually and confirm same-account vs accidental-new-account).
+//   - How long since the last successful sync (push or pull).
+// Re-polls every 5s while the Settings sheet is open so freshness is live.
+// Green if last sync < 10 min, amber 10min-1hr, red > 1hr or never.
+function SyncStatusLine() {
+  const [status, setStatus] = useState(() => (window.AB_FB && window.AB_FB.status ? window.AB_FB.status() : null));
+  useEffect(() => {
+    if (!window.AB_FB || !window.AB_FB.status) return;
+    const t = setInterval(() => setStatus(window.AB_FB.status()), 5000);
+    return () => clearInterval(t);
+  }, []);
+  if (!status) return null;
+  const now = Date.now();
+  const ageMs = status.lastSync ? (now - status.lastSync) : null;
+  let ageLabel = 'never';
+  let ageColor = '#e29090';
+  if (ageMs != null) {
+    if (ageMs < 60000) { ageLabel = 'just now'; ageColor = '#7ed3a0'; }
+    else if (ageMs < 10 * 60000) { ageLabel = Math.round(ageMs / 60000) + ' min ago'; ageColor = '#7ed3a0'; }
+    else if (ageMs < 60 * 60000) { ageLabel = Math.round(ageMs / 60000) + ' min ago'; ageColor = '#e2c890'; }
+    else if (ageMs < 24 * 3600000) { ageLabel = Math.round(ageMs / 3600000) + ' hr ago'; ageColor = '#e29090'; }
+    else { ageLabel = Math.round(ageMs / 86400000) + ' days ago'; ageColor = '#e29090'; }
+  }
+  const pushStateLabel = status.pushRetrying
+    ? `retrying (attempt ${status.pushFailures})`
+    : status.pushPending ? 'queued' : null;
+  return (
+    <div style={{ fontSize:11, color:'var(--text-dimmer)', marginBottom:8, lineHeight:1.6, fontFamily:'monospace' }}>
+      <div>uid: <span style={{ color:'var(--purple-light)' }}>{status.uidShort}</span>{status.uidShort ? '…' : ''}</div>
+      <div>last synced: <span style={{ color: ageColor }}>{ageLabel}</span>{pushStateLabel ? <span style={{ color:'#e2c890' }}> · push {pushStateLabel}</span> : null}</div>
+    </div>
+  );
+}
+
 function SettingsSheet({ apiKey, setApiKey, onClose }) {
   const [val, setVal] = useState(apiKey || '');
   const [reveal, setReveal] = useState(false);
@@ -4073,6 +4161,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
         ) : user ? (
           <div style={{ marginBottom:14 }}>
             <div style={{ fontSize:14, color:'var(--text)', marginBottom:4 }}>Signed in as {user.email}</div>
+            <SyncStatusLine />
             <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:8, lineHeight:1.5 }}>Recipes, plans, and lists sync across devices automatically.</div>
             <SyncRecoveryButton onMsg={setAuthMsg} />
             <div className="danger-btn" style={{ display:'inline-block', padding:'6px 14px' }} onClick={busy ? null : doSignOut}>
