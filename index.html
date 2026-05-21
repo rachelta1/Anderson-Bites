@@ -635,12 +635,12 @@ let pushTimer = null;
 let initialPullDone = false;
 // Active onSnapshot subscription. Unsubscribed on sign-out / auth change.
 let unsubSnapshot = null;
-// clientUpdatedAt of the last cloud snapshot we APPLIED to local. Used by
-// the onSnapshot listener to skip our own writes echoed back, and to skip
-// any older snapshot that arrives out of order. Bumped on every successful
-// push (since the cloud doc now matches our local) and on every applied
-// remote update.
-let lastAppliedCloudTs = 0;
+// Unique ID for THIS browser session/tab. Stamped on every push so the
+// onSnapshot listener can tell our own writes apart from another device's
+// writes without relying on timestamps (which are subject to clock skew
+// between devices — a phone whose clock is 2s ahead of another's would
+// silently swallow the other's changes if we compared by timestamp).
+const SESSION_ID = 'ses-' + Math.random().toString(36).slice(2, 12) + '-' + Date.now().toString(36);
 
 function snapshotLocal() {
   const out = {};
@@ -673,12 +673,12 @@ async function pushNow(opts = {}) {
       data,
       updatedAt: serverTimestamp(),
       clientUpdatedAt: ts,
+      // Stamp every write with our session ID so the listener can recognize
+      // and skip our own writes echoing back — independent of any clock
+      // skew between devices.
+      writerSessionId: SESSION_ID,
     });
     origSetItem('ab.lastSync', String(ts));
-    // Mark cloud as current with our own write so the onSnapshot listener
-    // skips its own echo (Firestore fires the listener once after server
-    // commits even for our own writes).
-    if (ts > lastAppliedCloudTs) lastAppliedCloudTs = ts;
     console.log('[AB sync] pushed', Object.keys(data).length, 'keys');
     pushFailures = 0;
     if (pushRetryTimer) { clearTimeout(pushRetryTimer); pushRetryTimer = null; }
@@ -827,9 +827,10 @@ function applyCloudData(data, cloudUpdatedTs) {
 
 // Subscribe to live cloud updates. Each remote change pushes to all
 // connected devices within ~1-3 seconds via the open Firestore channel
-// (no polling, no refocus needed). Skips events with hasPendingWrites
-// (our own local optimistic writes) and stale timestamps (our own writes
-// echoed back from the server, or out-of-order delivery).
+// (no polling, no refocus needed). Skips events that originated from this
+// session (writerSessionId match) — clock-skew-proof. usePersistedState's
+// JSON.stringify check is the second line of defense: even if a remote
+// update happens to contain identical data, no React re-render happens.
 function subscribeToCloud(user) {
   if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
   unsubSnapshot = onSnapshot(
@@ -841,12 +842,17 @@ function subscribeToCloud(user) {
       if (snap.metadata && snap.metadata.hasPendingWrites) return;
       if (!snap.exists()) return;
       const cloud = snap.data() || {};
+      // Skip writes from THIS session (our own writes echoed back from
+      // the server after Firestore commits them). Session-based check is
+      // immune to clock skew between devices — whereas a timestamp check
+      // would let a faster-clock device's writes hide a slower-clock
+      // device's writes.
+      if (cloud.writerSessionId && cloud.writerSessionId === SESSION_ID) {
+        console.log('[AB sync] live: own write echoed back, skipping');
+        return;
+      }
       const cloudUpdated = cloud.clientUpdatedAt || 0;
-      // Skip our own writes echoed back from the server (we already
-      // bumped lastAppliedCloudTs in pushNow), and any out-of-order
-      // older snapshots.
-      if (cloudUpdated <= lastAppliedCloudTs) return;
-      console.log('[AB sync] live update from cloud, applying', Object.keys(cloud.data || {}).length, 'keys');
+      console.log('[AB sync] live update from cloud (writer=' + (cloud.writerSessionId || 'unknown') + '), applying', Object.keys(cloud.data || {}).length, 'keys');
       // Set pulling=true briefly so React's resulting localStorage.setItem
       // writes (from usePersistedState's re-read effect) don't trigger
       // a push echo back to cloud.
