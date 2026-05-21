@@ -4259,7 +4259,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings</div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-13b</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
@@ -4341,12 +4341,6 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
             <div className="danger-btn" style={{ flex:1 }} onClick={() => { setApiKey(''); onClose(); }}>Clear</div>
           )}
           <div className="gen-btn" style={{ flex:2 }} onClick={save}>Save</div>
-        </div>
-        {/* Build marker — always visible. Bump this string with each
-            cache-busting deploy so the user can confirm at a glance which
-            version of the app is loaded on each device. */}
-        <div style={{ fontSize:10, color:'#444', textAlign:'center', marginTop:10, fontFamily:'monospace' }}>
-          build 2026-05-13 · live-sync-2
         </div>
       </div>
     </div>
