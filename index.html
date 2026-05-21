@@ -881,6 +881,13 @@ onAuthStateChanged(auth, async (user) => {
   // is always applied.
   lastAppliedCloudTs = 0;
   currentUser = user;
+  // CRITICAL: notify UI listeners IMMEDIATELY, before awaiting the cloud
+  // pull. On flaky networks the pull can take 10+ seconds — if the UI
+  // waits on that, the user sees the sign-in form sit there with cleared
+  // fields and assumes sign-in failed. The pull runs in the background;
+  // when it finishes, the existing 'ab:cloud-updated' event refreshes
+  // every usePersistedState with the cloud data.
+  authListeners.forEach(cb => { try { cb(user); } catch {} });
   if (user) {
     // One-shot pull first: handles the seed-from-local case (new account
     // with no cloud doc) and applies the current cloud state with all
@@ -892,7 +899,6 @@ onAuthStateChanged(auth, async (user) => {
     // since currentUser is null, but keep state consistent).
     initialPullDone = true;
   }
-  authListeners.forEach(cb => { try { cb(user); } catch {} });
 });
 
 // Auto-pull when the app regains focus / becomes visible. Covers the most
