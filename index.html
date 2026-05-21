@@ -597,7 +597,7 @@ import {
   signOut as fbSignOut,
 } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, setDoc, serverTimestamp,
+  getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
 
 const firebaseConfig = {
@@ -633,6 +633,14 @@ let pushTimer = null;
 // (~7 days idle / storage pressure), this push wins and uploads empty
 // defaults to Firestore — wiping the user's real data.
 let initialPullDone = false;
+// Active onSnapshot subscription. Unsubscribed on sign-out / auth change.
+let unsubSnapshot = null;
+// clientUpdatedAt of the last cloud snapshot we APPLIED to local. Used by
+// the onSnapshot listener to skip our own writes echoed back, and to skip
+// any older snapshot that arrives out of order. Bumped on every successful
+// push (since the cloud doc now matches our local) and on every applied
+// remote update.
+let lastAppliedCloudTs = 0;
 
 function snapshotLocal() {
   const out = {};
@@ -667,6 +675,10 @@ async function pushNow(opts = {}) {
       clientUpdatedAt: ts,
     });
     origSetItem('ab.lastSync', String(ts));
+    // Mark cloud as current with our own write so the onSnapshot listener
+    // skips its own echo (Firestore fires the listener once after server
+    // commits even for our own writes).
+    if (ts > lastAppliedCloudTs) lastAppliedCloudTs = ts;
     console.log('[AB sync] pushed', Object.keys(data).length, 'keys');
     pushFailures = 0;
     if (pushRetryTimer) { clearTimeout(pushRetryTimer); pushRetryTimer = null; }
@@ -775,21 +787,15 @@ async function pullFromCloud(user, opts = {}) {
       initialPullDone = true;
       return;
     }
-    // Wipe local ab.* keys then write cloud values, then reload so React
-    // re-reads its initial state from the freshly-populated localStorage.
-    const keysToRemove = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (shouldSync(k)) keysToRemove.push(k);
-    }
-    keysToRemove.forEach(k => origRemoveItem(k));
-    const data = cloud.data || {};
-    Object.keys(data).forEach(k => origSetItem(k, data[k]));
-    origSetItem('ab.lastSync', String(cloudUpdated));
+    // Apply the cloud snapshot to local. Previously this was followed by
+    // window.location.reload() so React would re-read localStorage on init.
+    // Now we dispatch a custom event ('ab:cloud-updated') instead, which
+    // every usePersistedState subscribes to and re-reads its key from local
+    // storage — seamless live update with no jarring page reload.
+    applyCloudData(cloud.data || {}, cloudUpdated);
     pulling = false;
     initialPullDone = true;
-    console.log('[AB sync] pulled', Object.keys(data).length, 'keys, reloading');
-    window.location.reload();
+    console.log('[AB sync] pulled', Object.keys(cloud.data || {}).length, 'keys');
   } catch (e) {
     console.warn('[AB sync] pull failed', e);
     pulling = false;
@@ -799,6 +805,63 @@ async function pullFromCloud(user, opts = {}) {
   }
 }
 
+// Apply a cloud snapshot to local storage in-place: wipe synced keys,
+// write the cloud values, bump lastAppliedCloudTs, and broadcast a
+// 'ab:cloud-updated' event so every usePersistedState in the React tree
+// re-reads its key. No page reload needed.
+function applyCloudData(data, cloudUpdatedTs) {
+  const keysToRemove = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (shouldSync(k)) keysToRemove.push(k);
+  }
+  keysToRemove.forEach(k => origRemoveItem(k));
+  Object.keys(data).forEach(k => origSetItem(k, data[k]));
+  origSetItem('ab.lastSync', String(cloudUpdatedTs));
+  if (cloudUpdatedTs > lastAppliedCloudTs) lastAppliedCloudTs = cloudUpdatedTs;
+  // Tell React: cloud state changed under your feet, re-read from local.
+  try {
+    window.dispatchEvent(new CustomEvent('ab:cloud-updated'));
+  } catch {}
+}
+
+// Subscribe to live cloud updates. Each remote change pushes to all
+// connected devices within ~1-3 seconds via the open Firestore channel
+// (no polling, no refocus needed). Skips events with hasPendingWrites
+// (our own local optimistic writes) and stale timestamps (our own writes
+// echoed back from the server, or out-of-order delivery).
+function subscribeToCloud(user) {
+  if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
+  unsubSnapshot = onSnapshot(
+    doc(db, 'households', user.uid),
+    (snap) => {
+      // Local optimistic write echo — Firestore fires the listener with
+      // hasPendingWrites=true before the server confirms. We already have
+      // this state since WE wrote it; ignore.
+      if (snap.metadata && snap.metadata.hasPendingWrites) return;
+      if (!snap.exists()) return;
+      const cloud = snap.data() || {};
+      const cloudUpdated = cloud.clientUpdatedAt || 0;
+      // Skip our own writes echoed back from the server (we already
+      // bumped lastAppliedCloudTs in pushNow), and any out-of-order
+      // older snapshots.
+      if (cloudUpdated <= lastAppliedCloudTs) return;
+      console.log('[AB sync] live update from cloud, applying', Object.keys(cloud.data || {}).length, 'keys');
+      // Set pulling=true briefly so React's resulting localStorage.setItem
+      // writes (from usePersistedState's re-read effect) don't trigger
+      // a push echo back to cloud.
+      pulling = true;
+      if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+      applyCloudData(cloud.data || {}, cloudUpdated);
+      // Give React a tick to process the event before re-enabling pushes.
+      setTimeout(() => { pulling = false; }, 200);
+    },
+    (err) => {
+      console.warn('[AB sync] live listener error', err);
+    }
+  );
+}
+
 const authListeners = new Set();
 onAuthStateChanged(auth, async (user) => {
   // Reset gate on every auth transition. If signing in, pullFromCloud
@@ -806,9 +869,18 @@ onAuthStateChanged(auth, async (user) => {
   // out, the !currentUser check in pushNow/schedulePush blocks pushes
   // anyway, so the gate state is moot.
   initialPullDone = false;
+  // Tear down any previous user's live subscription before swapping.
+  if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
+  // Reset the echo-skip pointer so the new user's first remote snapshot
+  // is always applied.
+  lastAppliedCloudTs = 0;
   currentUser = user;
   if (user) {
+    // One-shot pull first: handles the seed-from-local case (new account
+    // with no cloud doc) and applies the current cloud state with all
+    // sanity checks. Then open the live channel for ongoing updates.
     await pullFromCloud(user);
+    subscribeToCloud(user);
   } else {
     // No cloud to reconcile against — unlock pushes (they won't fire
     // since currentUser is null, but keep state consistent).
@@ -881,9 +953,11 @@ window.AB_FB = {
   createAccount: (email, password) => createUserWithEmailAndPassword(auth, email, password),
   signOut: async () => {
     if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+    if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
     await fbSignOut(auth);
     currentUser = null;
     initialPullDone = false;
+    lastAppliedCloudTs = 0;
   },
   syncNow: () => pushNow(),
   pullNow: () => currentUser ? pullFromCloud(currentUser, { force: true }) : Promise.resolve(),
@@ -941,6 +1015,29 @@ function usePersistedState(key, initial) {
   useEffect(() => {
     try { localStorage.setItem(key, JSON.stringify(state)); } catch {}
   }, [key, state]);
+  // Live cloud sync: when the cloud-sync layer applies a remote update to
+  // localStorage, it dispatches `ab:cloud-updated`. Every usePersistedState
+  // re-reads its key and updates React state if the value actually changed.
+  // The JSON-string comparison prevents unnecessary re-renders when our
+  // own writes echo back through Firestore.
+  useEffect(() => {
+    const onCloudUpdate = () => {
+      try {
+        const raw = localStorage.getItem(key);
+        const next = raw == null
+          ? (typeof initial === 'function' ? initial() : initial)
+          : JSON.parse(raw);
+        setState(prev => {
+          let prevStr;
+          let nextStr;
+          try { prevStr = JSON.stringify(prev); nextStr = JSON.stringify(next); } catch { return next; }
+          return prevStr === nextStr ? prev : next;
+        });
+      } catch {}
+    };
+    window.addEventListener('ab:cloud-updated', onCloudUpdate);
+    return () => window.removeEventListener('ab:cloud-updated', onCloudUpdate);
+  }, [key]);
   return [state, setState];
 }
 
