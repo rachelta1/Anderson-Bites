@@ -4342,6 +4342,12 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
           )}
           <div className="gen-btn" style={{ flex:2 }} onClick={save}>Save</div>
         </div>
+        {/* Build marker — always visible. Bump this string with each
+            cache-busting deploy so the user can confirm at a glance which
+            version of the app is loaded on each device. */}
+        <div style={{ fontSize:10, color:'#444', textAlign:'center', marginTop:10, fontFamily:'monospace' }}>
+          build 2026-05-13 · live-sync-2
+        </div>
       </div>
     </div>
   );
