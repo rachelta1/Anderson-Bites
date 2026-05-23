@@ -1726,6 +1726,30 @@ function proteinTagOf(recipe) {
   return null;
 }
 
+// Parse "I want ground beef" / "chicken sometime" / "shrimp" — any plain
+// mention of a protein word (without a "no/skip/avoid/never" prefix and
+// without a count modifier) is treated as a REQUEST: include at least one
+// dinner with that protein tag. Returns a Set of tags.
+function parseProteinRequirements(instructions) {
+  if (!instructions) return new Set();
+  const txt = instructions.toLowerCase();
+  const required = new Set();
+  for (const [tag, words] of Object.entries(PROTEIN_WORDS)) {
+    for (const w of words) {
+      // Skip if the user said "no <protein>" / "skip <protein>" / etc.
+      if (new RegExp(`\\b(?:no|skip|avoid|never|hate|dislike|allergic\\s+to)\\s+${w}\\b`).test(txt)) {
+        required.delete(tag); // ensure removed even if mentioned positively elsewhere
+        break;
+      }
+      // Bare mention of the protein word anywhere = include at least once.
+      if (new RegExp(`\\b${w}\\b`).test(txt)) {
+        required.add(tag);
+      }
+    }
+  }
+  return required;
+}
+
 // Parse "chicken one night only" / "no fish" / "two beef nights" / "1 pasta
 // night" out of the user's instructions. Returns { tag: maxCount, ... } —
 // each entry is a HARD ceiling (the plan should never have MORE of that
@@ -2027,6 +2051,11 @@ async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, 
   // honor them in the first place; the post-fix is a safety net for the cases
   // where it doesn't.
   const proteinCaps = parseProteinConstraints(instructions);
+  // Proteins the user MENTIONED (without "no/skip") = should appear at
+  // least once each in the plan. Filtered to remove any tag also capped
+  // at 0 (e.g. "no chicken" trumps a positive mention).
+  const proteinRequirements = [...parseProteinRequirements(instructions)]
+    .filter(tag => proteinCaps[tag] === undefined || proteinCaps[tag] > 0);
 
   // Shuffle the candidate list before sending to the LLM. Same seed → same
   // order, different seed → different order, which nudges the LLM toward
@@ -2074,11 +2103,12 @@ For each day, return ONE dinner (by exact name from the library) and a list of t
     - tier === 'task' (day has tasks like laundry, NO breakfast): dinner SHOULD be complexity=Medium. If no Medium is available, Light is acceptable. NEVER Heavy.
     - tier === 'free' (no breakfast, no tasks): dinner MUST be complexity=Medium OR Heavy. NEVER Light. Free days are reserved for the more involved dishes.
 (7) spread the load: don't pile multiple effort sources on one day if other days are empty. If a user-requested specific dinner (e.g. "pasta one night") would land on a tier='breakfast' day, prefer to put it on a DIFFERENT day instead.
-(8) PROTEIN CAPS are HARD limits. The user prompt includes a PROTEIN_CAPS object listing maximum dinners per protein (e.g. {"chicken": 1} means AT MOST one chicken dinner across the entire plan; {"fish": 0} means zero fish dinners). NEVER exceed these caps. If the user says "chicken one night only" and the cap is 1, exactly zero or one of your picks may have the chicken tag (turkey counts as chicken). When choosing recipes, count the protein tags as you go and stop reaching for that protein once you hit the cap.${rerollSeed > 1 ? `\n(9) THIS IS A RE-ROLL (attempt #${rerollSeed}). The user already saw plan(s) with these same constraints and wants DIFFERENT recipes this time. The DINNER LIBRARY below has already been filtered to remove recipes shown in earlier attempts — pick freely from it without trying to recreate a previous plan. Keep all hard constraints (1-8) intact. Within the candidate list, favor variety: don't gravitate to the same protein/cuisine cluster on every reroll.` : ''}
+(8) PROTEIN CAPS are HARD limits. The user prompt includes a PROTEIN_CAPS object listing maximum dinners per protein (e.g. {"chicken": 1} means AT MOST one chicken dinner across the entire plan; {"fish": 0} means zero fish dinners). NEVER exceed these caps. If the user says "chicken one night only" and the cap is 1, exactly zero or one of your picks may have the chicken tag (turkey counts as chicken). When choosing recipes, count the protein tags as you go and stop reaching for that protein once you hit the cap.
+(9) PROTEIN REQUIREMENTS are MINIMUMS the user explicitly asked for. The user prompt includes a PROTEIN_REQUIRED array listing protein tags that MUST each appear in AT LEAST ONE dinner across the plan if any matching recipe is available in the library. Example: if the user says "ground beef and chicken thursday", PROTEIN_REQUIRED would be ["beef", "chicken"] — at least one beef dinner AND at least one chicken dinner. Honor these BEFORE filling remaining slots with variety. If the library has zero recipes for a required protein, skip it (don't error). Required proteins still count toward their own PROTEIN_CAPS — but caps are usually generous when the user is actively asking for the protein.${rerollSeed > 1 ? `\n(10) THIS IS A RE-ROLL (attempt #${rerollSeed}). The user already saw plan(s) with these same constraints and wants DIFFERENT recipes this time. The DINNER LIBRARY below has already been filtered to remove recipes shown in earlier attempts — pick freely from it without trying to recreate a previous plan. Keep all hard constraints (1-9) intact. Within the candidate list, favor variety: don't gravitate to the same protein/cuisine cluster on every reroll.` : ''}
 
 Return ONLY JSON, no prose, no markdown.`;
 
-  const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
+  const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
 
   const text = await callClaude({ apiKey, system, user });
   const parsed = extractJson(text);
@@ -2289,6 +2319,55 @@ Return ONLY JSON, no prose, no markdown.`;
     }
   }
 
+  // Post-validation: enforce protein REQUIREMENTS (minimums). If the user
+  // mentioned a protein (e.g. "ground beef") but the LLM didn't include
+  // any dinner with that tag, swap an over-represented protein out for one
+  // that does have the required tag. Skip if the library doesn't actually
+  // have a recipe with the required tag (best-effort, not error).
+  for (const requiredTag of proteinRequirements) {
+    const currentCount = result.filter(slot => proteinTagOf(slot.dinner) === requiredTag).length;
+    if (currentCount > 0) continue; // already satisfied
+
+    // Find a candidate recipe with the required tag that satisfies day gates.
+    // Look for the "best" slot to swap: prefer a day whose current dinner has
+    // a non-required protein and isn't user-pinned to that weekday.
+    const swapInCandidates = effectiveCandidates.filter(r =>
+      !usedThisRun.has(r.name) &&
+      (r.tags || []).includes(requiredTag)
+    );
+    if (!swapInCandidates.length) {
+      console.warn(`[pickPlanWithLLM] protein required "${requiredTag}" — no library recipe with that tag, skipping`);
+      continue;
+    }
+
+    // Try each slot, swapping its dinner for a required-tag recipe that
+    // satisfies the day's tier and respects all caps.
+    let swapped = false;
+    for (let i = 0; i < result.length && !swapped; i++) {
+      const slot = result[i];
+      const slotTier = slot.tier || effortTierFor(slot.breakfasts, slot.tasks);
+      const slotTag = proteinTagOf(slot.dinner);
+      // Don't displace another required-tag pick
+      if (slotTag && proteinRequirements.includes(slotTag)) continue;
+      const fit = swapInCandidates.find(r =>
+        !usedThisRun.has(r.name) &&
+        tierAllowsComplexity(slotTier, r.complexity) &&
+        (proteinCaps[requiredTag] === undefined ||
+          (result.filter(s => proteinTagOf(s.dinner) === requiredTag).length) < proteinCaps[requiredTag])
+      );
+      if (fit) {
+        if (slot.dinner && slot.dinner.name) usedThisRun.delete(slot.dinner.name);
+        usedThisRun.add(fit.name);
+        result[i] = { ...slot, dinner: fit };
+        console.log(`[pickPlanWithLLM] swapped ${slot.dt} → ${fit.name} to satisfy required protein "${requiredTag}"`);
+        swapped = true;
+      }
+    }
+    if (!swapped) {
+      console.warn(`[pickPlanWithLLM] required protein "${requiredTag}" couldn't be inserted — no slot/tier compatible`);
+    }
+  }
+
   return result;
 }
 
@@ -2337,7 +2416,7 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
     ? excludedCandidates
     : dinnerCandidates;
 
-  return dinnerDays.map((day, dayIdx) => {
+  const result = dinnerDays.map((day, dayIdx) => {
     const breakfastNames = breakfastByDt[day.dt] || [];
     const breakfasts = breakfastNames.map(n => byName[n] || { name: n });
     const breakfast = breakfasts[0] || null; // back-compat
@@ -2375,6 +2454,42 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
 
     return { ...day, dinner: pick, breakfast, breakfasts, tasks: dayTasks, isFast, tier };
   });
+
+  // Post-validation: enforce protein REQUIREMENTS (minimums) — same logic
+  // as the LLM picker. Without this, "ground beef" in instructions would
+  // be ignored by the rule-based picker since the rule-based picker just
+  // sorts by tier rank + used count.
+  const proteinCapsLocal = parseProteinConstraints(instructions);
+  const proteinRequirements = [...parseProteinRequirements(instructions)]
+    .filter(tag => proteinCapsLocal[tag] === undefined || proteinCapsLocal[tag] > 0);
+  for (const requiredTag of proteinRequirements) {
+    const currentCount = result.filter(slot => proteinTagOf(slot.dinner) === requiredTag).length;
+    if (currentCount > 0) continue;
+    const swapInCandidates = effectiveCandidates.filter(r =>
+      !usedThisRun.has(r.name) &&
+      (r.tags || []).includes(requiredTag)
+    );
+    if (!swapInCandidates.length) continue;
+    let swapped = false;
+    for (let i = 0; i < result.length && !swapped; i++) {
+      const slot = result[i];
+      const slotTier = slot.tier || effortTierFor(slot.breakfasts, slot.tasks);
+      const slotTag = proteinTagOf(slot.dinner);
+      if (slotTag && proteinRequirements.includes(slotTag)) continue;
+      const fit = swapInCandidates.find(r =>
+        !usedThisRun.has(r.name) && tierAllowsComplexity(slotTier, r.complexity)
+      );
+      if (fit) {
+        if (slot.dinner && slot.dinner.name) usedThisRun.delete(slot.dinner.name);
+        usedThisRun.add(fit.name);
+        result[i] = { ...slot, dinner: fit };
+        console.log(`[pickPlan] swapped ${slot.dt} → ${fit.name} to satisfy required protein "${requiredTag}"`);
+        swapped = true;
+      }
+    }
+  }
+
+  return result;
 }
 
 /* ═══════════════════════════════════════════
@@ -4237,7 +4352,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-30s-2026-05-23b</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23c</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
