@@ -597,7 +597,7 @@ import {
   signOut as fbSignOut,
 } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp,
+  getFirestore, doc, getDoc, setDoc, serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
 
 const firebaseConfig = {
@@ -633,14 +633,6 @@ let pushTimer = null;
 // (~7 days idle / storage pressure), this push wins and uploads empty
 // defaults to Firestore — wiping the user's real data.
 let initialPullDone = false;
-// Active onSnapshot subscription. Unsubscribed on sign-out / auth change.
-let unsubSnapshot = null;
-// Unique ID for THIS browser session/tab. Stamped on every push so the
-// onSnapshot listener can tell our own writes apart from another device's
-// writes without relying on timestamps (which are subject to clock skew
-// between devices — a phone whose clock is 2s ahead of another's would
-// silently swallow the other's changes if we compared by timestamp).
-const SESSION_ID = 'ses-' + Math.random().toString(36).slice(2, 12) + '-' + Date.now().toString(36);
 
 function snapshotLocal() {
   const out = {};
@@ -673,10 +665,6 @@ async function pushNow(opts = {}) {
       data,
       updatedAt: serverTimestamp(),
       clientUpdatedAt: ts,
-      // Stamp every write with our session ID so the listener can recognize
-      // and skip our own writes echoing back — independent of any clock
-      // skew between devices.
-      writerSessionId: SESSION_ID,
     });
     origSetItem('ab.lastSync', String(ts));
     console.log('[AB sync] pushed', Object.keys(data).length, 'keys');
@@ -806,9 +794,9 @@ async function pullFromCloud(user, opts = {}) {
 }
 
 // Apply a cloud snapshot to local storage in-place: wipe synced keys,
-// write the cloud values, bump lastAppliedCloudTs, and broadcast a
-// 'ab:cloud-updated' event so every usePersistedState in the React tree
-// re-reads its key. No page reload needed.
+// write the cloud values, and broadcast a 'ab:cloud-updated' event so
+// every usePersistedState in the React tree re-reads its key. No page
+// reload needed.
 function applyCloudData(data, cloudUpdatedTs) {
   const keysToRemove = [];
   for (let i = 0; i < localStorage.length; i++) {
@@ -818,54 +806,10 @@ function applyCloudData(data, cloudUpdatedTs) {
   keysToRemove.forEach(k => origRemoveItem(k));
   Object.keys(data).forEach(k => origSetItem(k, data[k]));
   origSetItem('ab.lastSync', String(cloudUpdatedTs));
-  if (cloudUpdatedTs > lastAppliedCloudTs) lastAppliedCloudTs = cloudUpdatedTs;
   // Tell React: cloud state changed under your feet, re-read from local.
   try {
     window.dispatchEvent(new CustomEvent('ab:cloud-updated'));
   } catch {}
-}
-
-// Subscribe to live cloud updates. Each remote change pushes to all
-// connected devices within ~1-3 seconds via the open Firestore channel
-// (no polling, no refocus needed). Skips events that originated from this
-// session (writerSessionId match) — clock-skew-proof. usePersistedState's
-// JSON.stringify check is the second line of defense: even if a remote
-// update happens to contain identical data, no React re-render happens.
-function subscribeToCloud(user) {
-  if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
-  unsubSnapshot = onSnapshot(
-    doc(db, 'households', user.uid),
-    (snap) => {
-      // Local optimistic write echo — Firestore fires the listener with
-      // hasPendingWrites=true before the server confirms. We already have
-      // this state since WE wrote it; ignore.
-      if (snap.metadata && snap.metadata.hasPendingWrites) return;
-      if (!snap.exists()) return;
-      const cloud = snap.data() || {};
-      // Skip writes from THIS session (our own writes echoed back from
-      // the server after Firestore commits them). Session-based check is
-      // immune to clock skew between devices — whereas a timestamp check
-      // would let a faster-clock device's writes hide a slower-clock
-      // device's writes.
-      if (cloud.writerSessionId && cloud.writerSessionId === SESSION_ID) {
-        console.log('[AB sync] live: own write echoed back, skipping');
-        return;
-      }
-      const cloudUpdated = cloud.clientUpdatedAt || 0;
-      console.log('[AB sync] live update from cloud (writer=' + (cloud.writerSessionId || 'unknown') + '), applying', Object.keys(cloud.data || {}).length, 'keys');
-      // Set pulling=true briefly so React's resulting localStorage.setItem
-      // writes (from usePersistedState's re-read effect) don't trigger
-      // a push echo back to cloud.
-      pulling = true;
-      if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
-      applyCloudData(cloud.data || {}, cloudUpdated);
-      // Give React a tick to process the event before re-enabling pushes.
-      setTimeout(() => { pulling = false; }, 200);
-    },
-    (err) => {
-      console.warn('[AB sync] live listener error', err);
-    }
-  );
 }
 
 const authListeners = new Set();
@@ -875,31 +819,38 @@ onAuthStateChanged(auth, async (user) => {
   // out, the !currentUser check in pushNow/schedulePush blocks pushes
   // anyway, so the gate state is moot.
   initialPullDone = false;
-  // Tear down any previous user's live subscription before swapping.
-  if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
-  // Reset the echo-skip pointer so the new user's first remote snapshot
-  // is always applied.
-  lastAppliedCloudTs = 0;
   currentUser = user;
   // CRITICAL: notify UI listeners IMMEDIATELY, before awaiting the cloud
   // pull. On flaky networks the pull can take 10+ seconds — if the UI
   // waits on that, the user sees the sign-in form sit there with cleared
   // fields and assumes sign-in failed. The pull runs in the background;
-  // when it finishes, the existing 'ab:cloud-updated' event refreshes
-  // every usePersistedState with the cloud data.
+  // when it finishes, the 'ab:cloud-updated' event refreshes every
+  // usePersistedState with the cloud data.
   authListeners.forEach(cb => { try { cb(user); } catch {} });
   if (user) {
-    // One-shot pull first: handles the seed-from-local case (new account
-    // with no cloud doc) and applies the current cloud state with all
-    // sanity checks. Then open the live channel for ongoing updates.
+    // One-shot pull on sign-in. Periodic re-pulls happen on a timer
+    // (see pollPullTimer below) — no live Firestore listener, no
+    // session-id echo gymnastics. Simpler and avoids the iOS PWA
+    // issues that the onSnapshot version was hitting.
     await pullFromCloud(user);
-    subscribeToCloud(user);
   } else {
     // No cloud to reconcile against — unlock pushes (they won't fire
     // since currentUser is null, but keep state consistent).
     initialPullDone = true;
   }
 });
+
+// Periodic pull every 60 seconds while app is visible + signed in.
+// Replaces the previous onSnapshot real-time channel. Cheaper, simpler,
+// and works the same way on every browser / PWA / network condition.
+// 60s feels close enough to real-time for a household meal planner.
+const PULL_INTERVAL_MS = 60 * 1000;
+setInterval(() => {
+  if (document.hidden) return;
+  if (!currentUser || !initialPullDone) return;
+  if (pulling) return;
+  pullFromCloud(currentUser);
+}, PULL_INTERVAL_MS);
 
 // Auto-pull when the app regains focus / becomes visible. Covers the most
 // common "I edited on the other device, switch back here" case without any
@@ -965,11 +916,9 @@ window.AB_FB = {
   createAccount: (email, password) => createUserWithEmailAndPassword(auth, email, password),
   signOut: async () => {
     if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
-    if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
     await fbSignOut(auth);
     currentUser = null;
     initialPullDone = false;
-    lastAppliedCloudTs = 0;
   },
   syncNow: () => pushNow(),
   pullNow: () => currentUser ? pullFromCloud(currentUser, { force: true }) : Promise.resolve(),
@@ -4259,7 +4208,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-13b</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-timer-2026-05-23</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
