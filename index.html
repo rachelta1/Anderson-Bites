@@ -840,11 +840,11 @@ onAuthStateChanged(auth, async (user) => {
   }
 });
 
-// Periodic pull every 60 seconds while app is visible + signed in.
+// Periodic pull every 30 seconds while app is visible + signed in.
 // Replaces the previous onSnapshot real-time channel. Cheaper, simpler,
 // and works the same way on every browser / PWA / network condition.
-// 60s feels close enough to real-time for a household meal planner.
-const PULL_INTERVAL_MS = 60 * 1000;
+// 30s feels close enough to real-time for a household meal planner.
+const PULL_INTERVAL_MS = 30 * 1000;
 setInterval(() => {
   if (document.hidden) return;
   if (!currentUser || !initialPullDone) return;
@@ -4208,7 +4208,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-timer-2026-05-23</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-30s-2026-05-23</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
