@@ -615,7 +615,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 // Keys we don't sync — purely local bookkeeping.
-const SKIP_PREFIXES = ['ab.migration.', 'ab.lastSync'];
+const SKIP_PREFIXES = ['ab.migration.', 'ab.lastSync', 'ab.lastCloudCheck'];
 const shouldSync = k =>
   typeof k === 'string' && k.startsWith('ab.') &&
   !SKIP_PREFIXES.some(p => k.startsWith(p));
@@ -667,6 +667,10 @@ async function pushNow(opts = {}) {
       clientUpdatedAt: ts,
     });
     origSetItem('ab.lastSync', String(ts));
+    // ab.lastCloudCheck = "any successful cloud contact" for UI display
+    // (lastSync only updates on data change, which makes the UI look
+    // broken when nothing has changed in days).
+    origSetItem('ab.lastCloudCheck', String(Date.now()));
     console.log('[AB sync] pushed', Object.keys(data).length, 'keys');
     pushFailures = 0;
     if (pushRetryTimer) { clearTimeout(pushRetryTimer); pushRetryTimer = null; }
@@ -746,6 +750,7 @@ async function pullFromCloud(user, opts = {}) {
       // Use internal:true to bypass the initialPullDone gate (we're
       // mid-pull, the gate is exactly what's keeping pushes blocked).
       await pushNow({ internal: true });
+      origSetItem('ab.lastCloudCheck', String(Date.now()));
       initialPullDone = true;
       return;
     }
@@ -754,6 +759,9 @@ async function pullFromCloud(user, opts = {}) {
     const lastSync = parseInt(localStorage.getItem('ab.lastSync') || '0', 10);
     if (!force && cloudUpdated <= lastSync) {
       console.log('[AB sync] cloud not newer than last sync, skip pull (cloud=' + cloudUpdated + ', lastSync=' + lastSync + ')');
+      // Even though no data changed, we DID successfully contact cloud.
+      // Bump lastCloudCheck so the UI reflects current sync health.
+      origSetItem('ab.lastCloudCheck', String(Date.now()));
       pulling = false;
       initialPullDone = true;
       return;
@@ -772,6 +780,7 @@ async function pullFromCloud(user, opts = {}) {
       console.warn('[AB sync] cloud appears corrupted (cloudBytes=' + cloudBytes + ', localBytes=' + localBytes + '), pushing local instead of pulling');
       pulling = false;
       await pushNow({ internal: true });
+      origSetItem('ab.lastCloudCheck', String(Date.now()));
       initialPullDone = true;
       return;
     }
@@ -781,6 +790,7 @@ async function pullFromCloud(user, opts = {}) {
     // every usePersistedState subscribes to and re-reads its key from local
     // storage — seamless live update with no jarring page reload.
     applyCloudData(cloud.data || {}, cloudUpdated);
+    origSetItem('ab.lastCloudCheck', String(Date.now()));
     pulling = false;
     initialPullDone = true;
     console.log('[AB sync] pulled', Object.keys(cloud.data || {}).length, 'keys');
@@ -947,6 +957,7 @@ window.AB_FB = {
     localKeys: Object.keys(snapshotLocal()).length,
     localBytes: Object.values(snapshotLocal()).reduce((acc, v) => acc + ((v || '').length || 0), 0),
     lastSync: parseInt(localStorage.getItem('ab.lastSync') || '0', 10),
+    lastCloudCheck: parseInt(localStorage.getItem('ab.lastCloudCheck') || '0', 10),
   }),
 };
 </script>
@@ -4135,7 +4146,13 @@ function SyncStatusLine() {
   }, []);
   if (!status) return null;
   const now = Date.now();
-  const ageMs = status.lastSync ? (now - status.lastSync) : null;
+  // "Cloud check" = any successful contact with cloud (pull or push, even
+  // a no-op pull where nothing changed). Use this for display rather than
+  // lastSync (which only updates on actual data change and would say
+  // 'days ago' if nothing edited recently, falsely implying sync is broken).
+  // Fall back to lastSync for old installs that haven't run new code yet.
+  const checkAt = status.lastCloudCheck || status.lastSync;
+  const ageMs = checkAt ? (now - checkAt) : null;
   let ageLabel = 'never';
   let ageColor = '#e29090';
   if (ageMs != null) {
@@ -4145,13 +4162,25 @@ function SyncStatusLine() {
     else if (ageMs < 24 * 3600000) { ageLabel = Math.round(ageMs / 3600000) + ' hr ago'; ageColor = '#e29090'; }
     else { ageLabel = Math.round(ageMs / 86400000) + ' days ago'; ageColor = '#e29090'; }
   }
+  // "Last data change" line, secondary — when something actually changed
+  // most recently. Helps distinguish 'sync healthy but no edits' from
+  // 'sync broken.'
+  const dataAgeMs = status.lastSync ? (now - status.lastSync) : null;
+  let dataAgeLabel = null;
+  if (dataAgeMs != null) {
+    if (dataAgeMs < 60000) dataAgeLabel = 'just now';
+    else if (dataAgeMs < 60 * 60000) dataAgeLabel = Math.round(dataAgeMs / 60000) + ' min ago';
+    else if (dataAgeMs < 24 * 3600000) dataAgeLabel = Math.round(dataAgeMs / 3600000) + ' hr ago';
+    else dataAgeLabel = Math.round(dataAgeMs / 86400000) + ' days ago';
+  }
   const pushStateLabel = status.pushRetrying
     ? `retrying (attempt ${status.pushFailures})`
     : status.pushPending ? 'queued' : null;
   return (
     <div style={{ fontSize:11, color:'var(--text-dimmer)', marginBottom:8, lineHeight:1.6, fontFamily:'monospace' }}>
       <div>uid: <span style={{ color:'var(--purple-light)' }}>{status.uidShort}</span>{status.uidShort ? '…' : ''}</div>
-      <div>last synced: <span style={{ color: ageColor }}>{ageLabel}</span>{pushStateLabel ? <span style={{ color:'#e2c890' }}> · push {pushStateLabel}</span> : null}</div>
+      <div>cloud check: <span style={{ color: ageColor }}>{ageLabel}</span>{pushStateLabel ? <span style={{ color:'#e2c890' }}> · push {pushStateLabel}</span> : null}</div>
+      {dataAgeLabel && <div>last change: <span style={{ color:'#888' }}>{dataAgeLabel}</span></div>}
     </div>
   );
 }
@@ -4208,7 +4237,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-30s-2026-05-23</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-30s-2026-05-23b</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
