@@ -1012,6 +1012,14 @@ window.AB_FB = {
     patched: localStorage.setItem !== origSetItem,
   }),
   bumpUseEffectCounter: () => { syncDiag.useEffectFires++; },
+  // When JSON.stringify or localStorage.setItem fails inside
+  // usePersistedState's useEffect, this records the key + reason so
+  // the user can see which slice of state can't be persisted.
+  recordSerializeError: (key, reason) => {
+    syncDiag.lastSerializeErrorKey = key;
+    syncDiag.lastSerializeErrorReason = reason;
+    syncDiag.serializeErrors = (syncDiag.serializeErrors || 0) + 1;
+  },
 };
 </script>
 
@@ -1038,10 +1046,25 @@ function usePersistedState(key, initial) {
     }
   });
   useEffect(() => {
+    if (window.AB_FB && window.AB_FB.bumpUseEffectCounter) window.AB_FB.bumpUseEffectCounter();
+    let serialized;
     try {
-      if (window.AB_FB && window.AB_FB.bumpUseEffectCounter) window.AB_FB.bumpUseEffectCounter();
-      localStorage.setItem(key, JSON.stringify(state));
-    } catch {}
+      serialized = JSON.stringify(state);
+    } catch (e) {
+      // JSON.stringify threw — most likely circular reference in state.
+      // Record so the user sees WHICH key failed in Settings.
+      if (window.AB_FB && window.AB_FB.recordSerializeError) {
+        window.AB_FB.recordSerializeError(key, 'stringify: ' + String(e && e.message));
+      }
+      return;
+    }
+    try {
+      localStorage.setItem(key, serialized);
+    } catch (e) {
+      if (window.AB_FB && window.AB_FB.recordSerializeError) {
+        window.AB_FB.recordSerializeError(key, 'setItem: ' + String(e && e.message));
+      }
+    }
   }, [key, state]);
   // Live cloud sync: when the cloud-sync layer applies a remote update to
   // localStorage, it dispatches `ab:cloud-updated`. Every usePersistedState
@@ -4356,7 +4379,12 @@ function SyncStatusLine() {
       <div style={{ marginTop:4, color:'#555' }}>
         <div>patched: {status.patched ? '✓' : '✗ MISSING'}</div>
         <div>setItem: {d.setItemTotal||0} (sync: {d.setItemSync||0})</div>
-        <div>useEffect: {d.useEffectFires||0}</div>
+        <div>useEffect: {d.useEffectFires||0} · serErr: {d.serializeErrors||0}</div>
+        {d.lastSerializeErrorKey && (
+          <div style={{ color:'#e29090', wordBreak:'break-all' }}>
+            ✗ {d.lastSerializeErrorKey}: {d.lastSerializeErrorReason}
+          </div>
+        )}
         <div>sched: {d.scheduledPushes||0} · supp: {d.suppressedAuth||0}</div>
         <div>push: {d.pushAttempts||0} → ok {d.pushSuccesses||0} / err {d.pushNetErrors||0}</div>
         <div>pull: {d.pulls||0} → apply {d.pullApplies||0} / skip {d.pullSkips||0}</div>
@@ -4417,7 +4445,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23f</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23g</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
