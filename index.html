@@ -696,14 +696,38 @@ async function pushNow(opts = {}) {
 }
 
 function schedulePush() {
-  if (!currentUser || pulling || !initialPullDone) return;
+  // CRITICAL: do NOT bail on `pulling` here. Previous version returned
+  // early during the 1-2s window of every 30s pull tick — silently
+  // dropping any edit that happened in that window. The user would see
+  // "cloud check: just now" but "last change: hours ago" because pulls
+  // succeeded but pushes never queued. Now we always schedule the timer;
+  // tryPushWithBackoff handles the case where pulling is still true
+  // when the timer fires.
+  if (!currentUser || !initialPullDone) return;
   if (pushTimer) clearTimeout(pushTimer);
-  // 800ms debounce: batches rapid clicks (toggling several grocery items
-  // in succession) but is short enough that most "make a change → reload"
-  // sequences land AFTER the push has fired. Pair this with the
-  // visibilitychange/pagehide flush below so going to background or
-  // closing the tab also triggers an immediate push.
-  pushTimer = setTimeout(() => { pushTimer = null; pushNow(); }, 800);
+  pushTimer = setTimeout(tryPushWithBackoff, 800);
+}
+
+// Fires when the schedulePush debounce expires. If a pull is in progress
+// at that moment, retry every 300ms (up to 10 attempts = 3s) — typically
+// pulls finish in <1s so 1-3 retries is enough. Without this, schedulePush
+// scheduled the push but pushNow's pulling-check would bail and the edit
+// would be lost.
+let pushRetryAttempts = 0;
+function tryPushWithBackoff() {
+  pushTimer = null;
+  if (pulling) {
+    pushRetryAttempts++;
+    if (pushRetryAttempts > 10) {
+      console.warn('[AB sync] push gave up after 10 retries waiting for pull');
+      pushRetryAttempts = 0;
+      return;
+    }
+    pushTimer = setTimeout(tryPushWithBackoff, 300);
+    return;
+  }
+  pushRetryAttempts = 0;
+  pushNow();
 }
 
 // Fire any pending push RIGHT NOW. Called when the page is about to be
@@ -4352,7 +4376,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23c</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23d</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
