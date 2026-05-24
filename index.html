@@ -1020,6 +1020,15 @@ window.AB_FB = {
     syncDiag.lastSerializeErrorReason = reason;
     syncDiag.serializeErrors = (syncDiag.serializeErrors || 0) + 1;
   },
+  // Explicit "I just wrote to localStorage[key]" notification. Bypasses
+  // the monkey-patched localStorage.setItem which appears not to take
+  // effect on iOS Safari PWAs (own-property override on Storage objects
+  // sometimes silently fails). usePersistedState calls this directly so
+  // we don't depend on the monkey patch firing.
+  notifyKeyChanged: (key) => {
+    syncDiag.notifyKeyChangedCalls = (syncDiag.notifyKeyChangedCalls || 0) + 1;
+    if (shouldSync(key)) schedulePush();
+  },
 };
 </script>
 
@@ -1051,8 +1060,6 @@ function usePersistedState(key, initial) {
     try {
       serialized = JSON.stringify(state);
     } catch (e) {
-      // JSON.stringify threw — most likely circular reference in state.
-      // Record so the user sees WHICH key failed in Settings.
       if (window.AB_FB && window.AB_FB.recordSerializeError) {
         window.AB_FB.recordSerializeError(key, 'stringify: ' + String(e && e.message));
       }
@@ -1064,6 +1071,11 @@ function usePersistedState(key, initial) {
       if (window.AB_FB && window.AB_FB.recordSerializeError) {
         window.AB_FB.recordSerializeError(key, 'setItem: ' + String(e && e.message));
       }
+      return;
+    }
+    // Explicit notification (bypasses the unreliable monkey patch).
+    if (window.AB_FB && window.AB_FB.notifyKeyChanged) {
+      window.AB_FB.notifyKeyChanged(key);
     }
   }, [key, state]);
   // Live cloud sync: when the cloud-sync layer applies a remote update to
@@ -4445,7 +4457,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23g</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23h</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
