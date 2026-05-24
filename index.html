@@ -648,6 +648,19 @@ let pushFailures = 0;
 let pushRetryTimer = null;
 const PUSH_RETRY_DELAYS = [5000, 15000, 60000, 300000]; // 5s, 15s, 1m, 5m
 
+// Diagnostic counters surfaced in Settings — help debug "push isn't firing"
+// scenarios without needing console access. Reset on page load (session-only).
+const syncDiag = {
+  scheduledPushes: 0,    // schedulePush() called
+  suppressedAuth: 0,     // schedulePush bailed: no user or !initialPullDone
+  pushAttempts: 0,       // tryPushWithBackoff → pushNow called
+  pushSuccesses: 0,      // pushNow's setDoc resolved
+  pushNetErrors: 0,      // pushNow's setDoc threw
+  pulls: 0,              // pullFromCloud invoked
+  pullSkips: 0,          // pullFromCloud short-circuited (no newer cloud)
+  pullApplies: 0,        // pullFromCloud applied cloud data
+};
+
 async function pushNow(opts = {}) {
   const { internal = false } = opts;
   if (!currentUser) return;
@@ -658,6 +671,7 @@ async function pushNow(opts = {}) {
     console.log('[AB sync] push suppressed (pulling=' + pulling + ', initialPullDone=' + initialPullDone + ')');
     return;
   }
+  syncDiag.pushAttempts++;
   try {
     const ts = Date.now();
     const data = snapshotLocal();
@@ -672,10 +686,12 @@ async function pushNow(opts = {}) {
     // broken when nothing has changed in days).
     origSetItem('ab.lastCloudCheck', String(Date.now()));
     console.log('[AB sync] pushed', Object.keys(data).length, 'keys');
+    syncDiag.pushSuccesses++;
     pushFailures = 0;
     if (pushRetryTimer) { clearTimeout(pushRetryTimer); pushRetryTimer = null; }
   } catch (e) {
     console.warn('[AB sync] push failed', e);
+    syncDiag.pushNetErrors++;
     // Retry with exponential backoff. Without this, a single transient
     // network blip silently leaves cloud stale — which is exactly the
     // failure mode that caused husband-phone-sync to miss her data.
@@ -703,7 +719,8 @@ function schedulePush() {
   // succeeded but pushes never queued. Now we always schedule the timer;
   // tryPushWithBackoff handles the case where pulling is still true
   // when the timer fires.
-  if (!currentUser || !initialPullDone) return;
+  syncDiag.scheduledPushes++;
+  if (!currentUser || !initialPullDone) { syncDiag.suppressedAuth++; return; }
   if (pushTimer) clearTimeout(pushTimer);
   pushTimer = setTimeout(tryPushWithBackoff, 800);
 }
@@ -756,6 +773,7 @@ localStorage.removeItem = function(k) {
 
 async function pullFromCloud(user, opts = {}) {
   const { force = false } = opts;
+  syncDiag.pulls++;
   // CRITICAL: set `pulling = true` BEFORE the await. Any localStorage
   // writes that fire while we're awaiting getDoc (e.g. React mount-time
   // useEffects) will be suppressed by schedulePush/pushNow.
@@ -786,6 +804,7 @@ async function pullFromCloud(user, opts = {}) {
       // Even though no data changed, we DID successfully contact cloud.
       // Bump lastCloudCheck so the UI reflects current sync health.
       origSetItem('ab.lastCloudCheck', String(Date.now()));
+      syncDiag.pullSkips++;
       pulling = false;
       initialPullDone = true;
       return;
@@ -815,6 +834,7 @@ async function pullFromCloud(user, opts = {}) {
     // storage — seamless live update with no jarring page reload.
     applyCloudData(cloud.data || {}, cloudUpdated);
     origSetItem('ab.lastCloudCheck', String(Date.now()));
+    syncDiag.pullApplies++;
     pulling = false;
     initialPullDone = true;
     console.log('[AB sync] pulled', Object.keys(cloud.data || {}).length, 'keys');
@@ -982,6 +1002,7 @@ window.AB_FB = {
     localBytes: Object.values(snapshotLocal()).reduce((acc, v) => acc + ((v || '').length || 0), 0),
     lastSync: parseInt(localStorage.getItem('ab.lastSync') || '0', 10),
     lastCloudCheck: parseInt(localStorage.getItem('ab.lastCloudCheck') || '0', 10),
+    diag: { ...syncDiag },
   }),
 };
 </script>
@@ -4315,11 +4336,17 @@ function SyncStatusLine() {
   const pushStateLabel = status.pushRetrying
     ? `retrying (attempt ${status.pushFailures})`
     : status.pushPending ? 'queued' : null;
+  const d = status.diag || {};
   return (
     <div style={{ fontSize:11, color:'var(--text-dimmer)', marginBottom:8, lineHeight:1.6, fontFamily:'monospace' }}>
       <div>uid: <span style={{ color:'var(--purple-light)' }}>{status.uidShort}</span>{status.uidShort ? '…' : ''}</div>
       <div>cloud check: <span style={{ color: ageColor }}>{ageLabel}</span>{pushStateLabel ? <span style={{ color:'#e2c890' }}> · push {pushStateLabel}</span> : null}</div>
       {dataAgeLabel && <div>last change: <span style={{ color:'#888' }}>{dataAgeLabel}</span></div>}
+      <div style={{ marginTop:4, color:'#555' }}>
+        <div>sched: {d.scheduledPushes||0} · supp: {d.suppressedAuth||0}</div>
+        <div>push: {d.pushAttempts||0} → ok {d.pushSuccesses||0} / err {d.pushNetErrors||0}</div>
+        <div>pull: {d.pulls||0} → apply {d.pullApplies||0} / skip {d.pullSkips||0}</div>
+      </div>
     </div>
   );
 }
@@ -4376,7 +4403,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23d</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23e</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
