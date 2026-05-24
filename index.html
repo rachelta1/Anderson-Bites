@@ -659,6 +659,9 @@ const syncDiag = {
   pulls: 0,              // pullFromCloud invoked
   pullSkips: 0,          // pullFromCloud short-circuited (no newer cloud)
   pullApplies: 0,        // pullFromCloud applied cloud data
+  setItemTotal: 0,       // ANY call to the patched localStorage.setItem
+  setItemSync: 0,        // setItem call for an ab.* key that should sync
+  useEffectFires: 0,     // usePersistedState's useEffect fired
 };
 
 async function pushNow(opts = {}) {
@@ -763,8 +766,9 @@ function flushPush() {
 }
 
 localStorage.setItem = function(k, v) {
+  syncDiag.setItemTotal++;
   origSetItem(k, v);
-  if (shouldSync(k)) schedulePush();
+  if (shouldSync(k)) { syncDiag.setItemSync++; schedulePush(); }
 };
 localStorage.removeItem = function(k) {
   origRemoveItem(k);
@@ -1003,7 +1007,11 @@ window.AB_FB = {
     lastSync: parseInt(localStorage.getItem('ab.lastSync') || '0', 10),
     lastCloudCheck: parseInt(localStorage.getItem('ab.lastCloudCheck') || '0', 10),
     diag: { ...syncDiag },
+    // Verify the monkey patch is currently installed — if some other code
+    // re-assigned localStorage.setItem after us, sched would never bump.
+    patched: localStorage.setItem !== origSetItem,
   }),
+  bumpUseEffectCounter: () => { syncDiag.useEffectFires++; },
 };
 </script>
 
@@ -1030,7 +1038,10 @@ function usePersistedState(key, initial) {
     }
   });
   useEffect(() => {
-    try { localStorage.setItem(key, JSON.stringify(state)); } catch {}
+    try {
+      if (window.AB_FB && window.AB_FB.bumpUseEffectCounter) window.AB_FB.bumpUseEffectCounter();
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch {}
   }, [key, state]);
   // Live cloud sync: when the cloud-sync layer applies a remote update to
   // localStorage, it dispatches `ab:cloud-updated`. Every usePersistedState
@@ -4343,6 +4354,9 @@ function SyncStatusLine() {
       <div>cloud check: <span style={{ color: ageColor }}>{ageLabel}</span>{pushStateLabel ? <span style={{ color:'#e2c890' }}> · push {pushStateLabel}</span> : null}</div>
       {dataAgeLabel && <div>last change: <span style={{ color:'#888' }}>{dataAgeLabel}</span></div>}
       <div style={{ marginTop:4, color:'#555' }}>
+        <div>patched: {status.patched ? '✓' : '✗ MISSING'}</div>
+        <div>setItem: {d.setItemTotal||0} (sync: {d.setItemSync||0})</div>
+        <div>useEffect: {d.useEffectFires||0}</div>
         <div>sched: {d.scheduledPushes||0} · supp: {d.suppressedAuth||0}</div>
         <div>push: {d.pushAttempts||0} → ok {d.pushSuccesses||0} / err {d.pushNetErrors||0}</div>
         <div>pull: {d.pulls||0} → apply {d.pullApplies||0} / skip {d.pullSkips||0}</div>
@@ -4403,7 +4417,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23e</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23f</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
