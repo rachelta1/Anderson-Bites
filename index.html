@@ -4073,16 +4073,59 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       .catch(() => {});
   }, [items, apiKey]);
 
-  const toggle = (name) => setItems(prev => prev.map(i => i.n === name ? { ...i, done: !i.done } : i));
+  // Case/whitespace-insensitive identity for grocery items. "Garlic",
+  // "garlic" and "garlic " are the same item.
+  const normName = (s) => (s || '').trim().toLowerCase();
+
+  // Maintenance: merge duplicate-name entries. Dupes happen when an item
+  // is re-added manually while an old crossed-off copy sits hidden
+  // (showDone off), or when device lists merged during a sync outage.
+  // With dupes present, toggle(name) flips every copy at once — hidden
+  // copies pop in and out of view on alternating taps (the "ghost
+  // garlic" bug). Merge rule: union qty + src, active wins over done.
+  // Idempotent — second run finds no dupes, so no setItems loop.
+  useEffect(() => {
+    const byKey = {};
+    let dupes = false;
+    items.forEach(it => {
+      const k = normName(it.n);
+      if (!byKey[k]) { byKey[k] = { ...it }; return; }
+      dupes = true;
+      const tgt = byKey[k];
+      const qs = new Set([...(tgt.q || '').split(' + '), ...(it.q || '').split(' + ')].map(s => s.trim()).filter(Boolean));
+      tgt.q = [...qs].join(' + ');
+      const ss = new Set([...(tgt.src || '').split(' + '), ...(it.src || '').split(' + ')].map(s => s.trim()).filter(Boolean));
+      tgt.src = [...ss].join(' + ');
+      tgt.done = tgt.done && it.done;
+    });
+    if (dupes) setItems(Object.values(byKey));
+  }, [items]);
+
+  const toggle = (name) => {
+    const key = normName(name);
+    setItems(prev => prev.map(i => normName(i.n) === key ? { ...i, done: !i.done } : i));
+  };
 
   const addItem = () => {
     const t = newItemText.trim();
     if (!t) return;
     const { q, n } = parseItem(t);
-    setItems(prev => [
-      { q, n, done:false, src:'Added manually' },
-      ...prev,
-    ]);
+    const key = normName(n);
+    setItems(prev => {
+      const idx = prev.findIndex(i => normName(i.n) === key);
+      if (idx >= 0) {
+        // Item already on the list (often a hidden crossed-off copy the
+        // user can't see with showDone off). Reactivate it in place
+        // instead of creating a duplicate row.
+        return prev.map((i, j) => j === idx ? {
+          ...i,
+          done: false,
+          q: q || i.q,
+          src: /manual/i.test(i.src || '') ? i.src : [i.src, 'Added manually'].filter(Boolean).join(' + '),
+        } : i);
+      }
+      return [{ q, n, done:false, src:'Added manually' }, ...prev];
+    });
     setNewItemText('');
   };
 
@@ -4166,7 +4209,7 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
             <div key={cat}>
               <div className="cat-header">{cat}</div>
               {catItems.map(({ q, n, done, src }) => (
-                <div key={n} className={`check-row${done ? ' crossed' : ''}`} style={{ paddingTop:10, paddingBottom:10 }}>
+                <div key={normName(n)} className={`check-row${done ? ' crossed' : ''}`} style={{ paddingTop:10, paddingBottom:10 }}>
                   <div className={`check-box${done ? ' done' : ''}`} onClick={() => toggle(n)} style={{ cursor:'pointer' }} />
                   <div style={{ flex:1 }}>
                     <div>{q && <span className="qty">{q}</span>} {n}</div>
@@ -4457,7 +4500,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-23h</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-24a</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
