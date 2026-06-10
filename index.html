@@ -758,10 +758,15 @@ function flushPush() {
   if (pushTimer) {
     clearTimeout(pushTimer);
     pushTimer = null;
-    // pushNow is async; we don't await because beforeunload/pagehide
-    // can't wait. Modern browsers keep in-flight fetches alive briefly
-    // after unload, which is enough for setDoc to land.
-    pushNow();
+    // Route through tryPushWithBackoff, NOT pushNow directly: if a pull
+    // is in flight at this exact moment, pushNow would bail on its
+    // pulling-gate and the edit would never be queued again — then a
+    // later pull could overwrite it. The backoff path retries through
+    // the pull window (300ms × 10). We can't await here (pagehide /
+    // beforeunload won't wait), but browsers keep in-flight fetches and
+    // short timers alive briefly after backgrounding, which is enough
+    // for setDoc to land in the common case.
+    tryPushWithBackoff();
   }
 }
 
@@ -778,14 +783,25 @@ localStorage.removeItem = function(k) {
 async function pullFromCloud(user, opts = {}) {
   const { force = false } = opts;
   syncDiag.pulls++;
+  // If local edits are sitting in the push debounce window, let the push
+  // land first — applying a newer cloud snapshot now would cancel the
+  // pending push AND overwrite the un-pushed edit (the "my check-off
+  // undid itself" bug when both spouses use the app simultaneously).
+  // The push fires within ~1s; the next 30s tick pulls safely after.
+  // Never defer the initial sign-in pull (initialPullDone=false — pushes
+  // are gated until it completes, so pushTimer can't hold real edits) or
+  // an explicit force pull (user asked for cloud's version).
+  if (pushTimer && initialPullDone && !force) {
+    syncDiag.pullDeferred = (syncDiag.pullDeferred || 0) + 1;
+    console.log('[AB sync] pull deferred — local edits pending push');
+    return;
+  }
   // CRITICAL: set `pulling = true` BEFORE the await. Any localStorage
   // writes that fire while we're awaiting getDoc (e.g. React mount-time
   // useEffects) will be suppressed by schedulePush/pushNow.
   pulling = true;
-  // Cancel any push timer that schedulePush may have queued before
-  // currentUser was set (or before we got here). Belt-and-suspenders —
-  // pulling=true already blocks pushNow, but killing the timer means
-  // we don't have a stale push fire as soon as pulling drops.
+  // Force pulls drop any pending push — the user explicitly chose
+  // cloud's version over local state.
   if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
   try {
     const snap = await getDoc(doc(db, 'households', user.uid));
@@ -1033,7 +1049,7 @@ window.AB_FB = {
 </script>
 
 <script type="text/babel" data-presets="react">
-const { useState, useCallback, useEffect } = React;
+const { useState, useCallback, useEffect, useRef } = React;
 
 /* ═══════════════════════════════════════════
    ⚙ EMBED YOUR CLAUDE API KEY HERE
@@ -1054,8 +1070,19 @@ function usePersistedState(key, initial) {
       return typeof initial === 'function' ? initial() : initial;
     }
   });
+  // True when the current state value came FROM a cloud apply (the
+  // ab:cloud-updated listener below). The persist effect uses this to
+  // skip the push notification for cloud-originated changes — the value
+  // is already in localStorage AND already in cloud, so echoing it back
+  // up would just bump cloud's timestamp and trigger a pointless
+  // re-apply on the other device.
+  const fromCloud = useRef(false);
   useEffect(() => {
     if (window.AB_FB && window.AB_FB.bumpUseEffectCounter) window.AB_FB.bumpUseEffectCounter();
+    if (fromCloud.current) {
+      fromCloud.current = false;
+      return;
+    }
     let serialized;
     try {
       serialized = JSON.stringify(state);
@@ -1094,7 +1121,10 @@ function usePersistedState(key, initial) {
           let prevStr;
           let nextStr;
           try { prevStr = JSON.stringify(prev); nextStr = JSON.stringify(next); } catch { return next; }
-          return prevStr === nextStr ? prev : next;
+          if (prevStr === nextStr) return prev;
+          // Mark so the persist effect skips the push echo for this change.
+          fromCloud.current = true;
+          return next;
         });
       } catch {}
     };
@@ -4442,7 +4472,7 @@ function SyncStatusLine() {
         )}
         <div>sched: {d.scheduledPushes||0} · supp: {d.suppressedAuth||0}</div>
         <div>push: {d.pushAttempts||0} → ok {d.pushSuccesses||0} / err {d.pushNetErrors||0}</div>
-        <div>pull: {d.pulls||0} → apply {d.pullApplies||0} / skip {d.pullSkips||0}</div>
+        <div>pull: {d.pulls||0} → apply {d.pullApplies||0} / skip {d.pullSkips||0} / defer {d.pullDeferred||0}</div>
       </div>
     </div>
   );
@@ -4500,7 +4530,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-24a</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-24b</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
