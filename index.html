@@ -643,6 +643,27 @@ function snapshotLocal() {
   return out;
 }
 
+// Wrap a promise with a hard timeout. Firestore's getDoc/setDoc can hang
+// for minutes on flaky phone networks; an unsettled pull would leave
+// pulling=true forever and wedge the entire sync engine (the 30s tick,
+// heartbeat, and push retries all skip while pulling). A timed-out call
+// is treated as a normal failure: pull's catch resets the flags, push's
+// catch enters the retry ladder. If the underlying call later succeeds
+// anyway, the result is discarded — harmless, since pushes are idempotent
+// whole-doc writes and an unapplied pull just retries next tick.
+const withTimeout = (promise, ms, label) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error((label || 'op') + ' timed out after ' + ms + 'ms')), ms)),
+  ]);
+
+// True while a pushNow setDoc is actually in flight. The pull-defer check
+// must cover this too, not just pushTimer: the timer goes null the moment
+// the push STARTS, but the snapshot hasn't landed in cloud until setDoc
+// resolves — a pull applied during that window would wipe the local edit
+// and then skip-gate away the cloud copy when it lands.
+let pushInFlight = false;
+
 // Counter for failed pushes — drives retry backoff. Reset on success.
 let pushFailures = 0;
 let pushRetryTimer = null;
@@ -675,14 +696,19 @@ async function pushNow(opts = {}) {
     return;
   }
   syncDiag.pushAttempts++;
+  pushInFlight = true;
   try {
     const ts = Date.now();
     const data = snapshotLocal();
-    await setDoc(doc(db, 'households', currentUser.uid), {
+    // 20s hard timeout: a hung setDoc must not leave pushInFlight stuck
+    // true (which would defer every pull indefinitely). Timeout = failure
+    // → retry ladder below. If the write lands server-side anyway, the
+    // retry just rewrites the same data — idempotent.
+    await withTimeout(setDoc(doc(db, 'households', currentUser.uid), {
       data,
       updatedAt: serverTimestamp(),
       clientUpdatedAt: ts,
-    });
+    }), 20000, 'push setDoc');
     origSetItem('ab.lastSync', String(ts));
     // ab.lastCloudCheck = "any successful cloud contact" for UI display
     // (lastSync only updates on data change, which makes the UI look
@@ -711,6 +737,8 @@ async function pushNow(opts = {}) {
       console.warn('[AB sync] push retry exhausted after ' + PUSH_RETRY_DELAYS.length + ' attempts — manual recovery may be needed');
       pushFailures = 0; // Reset so the next user edit gets fresh retry budget.
     }
+  } finally {
+    pushInFlight = false;
   }
 }
 
@@ -729,17 +757,22 @@ function schedulePush() {
 }
 
 // Fires when the schedulePush debounce expires. If a pull is in progress
-// at that moment, retry every 300ms (up to 10 attempts = 3s) — typically
-// pulls finish in <1s so 1-3 retries is enough. Without this, schedulePush
-// scheduled the push but pushNow's pulling-check would bail and the edit
-// would be lost.
+// at that moment — or a previous push's setDoc is still in flight — retry
+// every 300ms (up to 20 attempts = 6s). Typical pulls/pushes finish in
+// <1s so 1-3 retries is enough; the 15s/20s network timeouts guarantee
+// the blocking flag always clears. Waiting on pushInFlight also
+// serializes pushes, so two setDocs can never race each other and land
+// out of order (older snapshot overwriting newer).
 let pushRetryAttempts = 0;
 function tryPushWithBackoff() {
   pushTimer = null;
-  if (pulling) {
+  if (pulling || pushInFlight) {
     pushRetryAttempts++;
-    if (pushRetryAttempts > 10) {
-      console.warn('[AB sync] push gave up after 10 retries waiting for pull');
+    // 60 × 300ms = 18s budget — must outlast the 15s pull getDoc timeout,
+    // otherwise a push could give up while a slow pull finishes and the
+    // edit would sit unpushed until the 5-min heartbeat.
+    if (pushRetryAttempts > 60) {
+      console.warn('[AB sync] push gave up after 60 retries waiting for ' + (pulling ? 'pull' : 'in-flight push'));
       pushRetryAttempts = 0;
       return;
     }
@@ -783,17 +816,25 @@ localStorage.removeItem = function(k) {
 async function pullFromCloud(user, opts = {}) {
   const { force = false } = opts;
   syncDiag.pulls++;
-  // If local edits are sitting in the push debounce window, let the push
-  // land first — applying a newer cloud snapshot now would cancel the
-  // pending push AND overwrite the un-pushed edit (the "my check-off
-  // undid itself" bug when both spouses use the app simultaneously).
-  // The push fires within ~1s; the next 30s tick pulls safely after.
+  // If local edits are sitting in the push debounce window (pushTimer) OR
+  // a push's setDoc is still in flight (pushInFlight), let the push land
+  // first — applying a newer cloud snapshot now would overwrite the
+  // not-yet-in-cloud edit (the "my check-off undid itself" bug when both
+  // spouses use the app simultaneously). The in-flight case matters too:
+  // the timer goes null when the push STARTS, but until setDoc resolves
+  // the edit isn't in cloud, and a pull in that window would wipe it
+  // locally and then skip-gate away the cloud copy when it lands.
+  // The push lands within seconds; the next 30s tick pulls safely after.
   // Never defer the initial sign-in pull (initialPullDone=false — pushes
-  // are gated until it completes, so pushTimer can't hold real edits) or
+  // are gated until it completes, so neither flag can hold real edits) or
   // an explicit force pull (user asked for cloud's version).
-  if (pushTimer && initialPullDone && !force) {
+  // pushRetryTimer also defers: it means local has unsynced edits whose
+  // push FAILED (e.g. network blip) and is waiting to retry. Pulling over
+  // them would wipe the edits before the retry lands. The ladder is
+  // bounded (~6.5 min worst case), so pulls can't starve indefinitely.
+  if ((pushTimer || pushInFlight || pushRetryTimer) && initialPullDone && !force) {
     syncDiag.pullDeferred = (syncDiag.pullDeferred || 0) + 1;
-    console.log('[AB sync] pull deferred — local edits pending push');
+    console.log('[AB sync] pull deferred — local edits pending push (timer=' + !!pushTimer + ', inFlight=' + pushInFlight + ', retry=' + !!pushRetryTimer + ')');
     return;
   }
   // CRITICAL: set `pulling = true` BEFORE the await. Any localStorage
@@ -804,7 +845,11 @@ async function pullFromCloud(user, opts = {}) {
   // cloud's version over local state.
   if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
   try {
-    const snap = await getDoc(doc(db, 'households', user.uid));
+    // 15s hard timeout: a hung getDoc must not leave pulling stuck true,
+    // which would freeze the whole engine (tick, heartbeat, push retries
+    // all wait on it). Timeout lands in the catch below → flags reset →
+    // next 30s tick retries.
+    const snap = await withTimeout(getDoc(doc(db, 'households', user.uid)), 15000, 'pull getDoc');
     if (!snap.exists()) {
       // First time on this account — push local state up to seed the cloud doc.
       console.log('[AB sync] no cloud doc yet, seeding from local');
@@ -933,6 +978,10 @@ setInterval(() => {
 let lastAutoPull = 0;
 function maybeAutoPull() {
   if (!currentUser) return;
+  // Don't start a second pull while one is already in flight (the 30s
+  // tick checks this; the focus path must too, or a focus event during
+  // a slow pull races two getDocs against each other).
+  if (pulling) return;
   // Throttle to at most once per minute. Sync isn't time-critical and
   // skipping rapid focus events (alt-tab, multitask switcher peek)
   // saves Firestore reads. Manual ↻ refresh always works regardless.
@@ -970,6 +1019,8 @@ setInterval(() => {
   if (pushTimer) return;
   // Skip if a retry timer is queued — we're already trying to recover.
   if (pushRetryTimer) return;
+  // Skip if a push is mid-flight right now.
+  if (pushInFlight) return;
   const lastSync = parseInt(localStorage.getItem('ab.lastSync') || '0', 10);
   // Only push if local likely has unsynced changes (we haven't pushed
   // recently). Avoids wasting Firestore writes when the app sits idle.
@@ -4530,7 +4581,7 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-24b</span></div>
+          <div className="modal-title">Settings <span style={{ fontSize:10, color:'var(--purple-light)', fontWeight:400, fontFamily:'monospace', marginLeft:6 }}>build-2026-05-24c</span></div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
 
