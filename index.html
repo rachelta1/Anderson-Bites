@@ -1214,7 +1214,7 @@ const DEFAULT_PANTRY = [
 // the preview modal. Without labels every ingredient variant got its own row,
 // which made the list noisy.
 const PANTRY_PATTERNS = [
-  { re: /\b\w+\s+oil\b/i, label: 'oil' },
+  { re: /\b(olive|vegetable|canola|sesame|avocado|coconut|sunflower|safflower|grapeseed|corn)\s+oil\b/i, label: 'oil' },
   { re: /\bseasoning\b/i, label: 'seasoning' },
   { re: /\bspices?\b/i, label: 'spice' },
   { re: /\bdried\s+\w+\s+(herbs|herb)\b/i, label: 'dried herbs' },
@@ -1223,9 +1223,27 @@ const PANTRY_PATTERNS = [
   { re: /\b\w+\s+powder\b/i, label: 'powder' },
   { re: /\b\w+\s+flakes?\b/i, label: 'flakes' },
   { re: /\bsalt\b/i, label: 'salt' },
-  { re: /\bpepper\b/i, label: 'pepper' },
+  { re: /\b(black|white|cayenne|ground|cracked|lemon|crushed\s+red|red)\s+peppers?\b/i, label: 'pepper' },
+  { re: /\bpeppercorns?\b/i, label: 'pepper' },
   { re: /\bsugar\b/i, label: 'sugar' },
 ];
+
+// Ingredients that must NEVER be treated as pantry staples — fresh produce and
+// specialty items a shopper genuinely has to buy. Checked FIRST in
+// classifyPantry (so a staple word like "pepper"/"oil" inside the name can't
+// claim them) and re-checked at every staple-prune site (so a stale or wrong
+// LLM classification can't silently drop them from the grocery list either).
+const NEVER_STAPLE_PATTERNS = [
+  /\bbell\s+peppers?\b/i,                                  // red/green/yellow bell pepper = vegetable, not the spice
+  /\b(snap|snow|sugar\s+snap)\s+peas?\b/i,                 // fresh peas
+  /\b(jalape\w+|serrano|poblano|habanero|anaheim|fresno|thai|banana)\s+peppers?\b/i, // fresh chiles
+  /\b(jalape\w+|serrano|poblano|habanero|anaheim|fresno)\b/i,
+  /\b(peanut|chili|chile|truffle|walnut|hazelnut)\s+oil\b/i, // specialty oils, not a default-stocked staple
+];
+function isNeverStaple(name) {
+  const lo = (name || '').toLowerCase();
+  return NEVER_STAPLE_PATTERNS.some(re => re.test(lo));
+}
 
 // Map every recipe ingredient to a single deduped pantry "concept" — or null
 // if it's not pantry. The concept key is what the preview modal shows the user
@@ -1256,6 +1274,9 @@ function classifyPantry(pantryStaples) {
   return (ing) => {
     if (!ing) return null;
     const lo = ing.toLowerCase();
+    // Fresh produce / specialty items always go on the list, even if a staple
+    // word appears inside the name (e.g. "red bell pepper" contains "pepper").
+    if (isNeverStaple(lo)) return null;
     for (const p of stapleList) {
       // Bidirectional phrase match: "kosher salt" matches staple "salt"
       // (staple is a phrase inside ingredient), and ingredient "ginger" matches
@@ -4147,6 +4168,7 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
             const lo = (it.n || '').toLowerCase();
             if (!stapleKeys.has(lo)) return true;
             if (/manual/i.test(it.src || '')) return true;
+            if (isNeverStaple(it.n)) return true; // fresh produce — keep even if LLM mislabeled it
             return false;
           }));
         }
@@ -6043,6 +6065,9 @@ function AutoPlanScreen({
         if (/manual/i.test(it.src || '')) return true;
         const name = it.n || '';
         const lo = name.toLowerCase();
+        // Fresh produce / specialty items are never staples — keep even if a
+        // prior LLM classification cached them as such.
+        if (isNeverStaple(name)) return true;
         // User explicitly opted this concept back onto the grocery list — skip the scrub.
         const concept = classify(name);
         if (concept && excludedStaples.has(concept)) return true;
@@ -6093,6 +6118,7 @@ function AutoPlanScreen({
               const lo = (it.n || '').toLowerCase();
               if (!stapleKeys.has(lo)) return true;
               if (/manual/i.test(it.src || '')) return true;
+              if (isNeverStaple(it.n)) return true; // fresh produce — keep even if Claude mislabeled it
               return false;
             });
             const justPruned = before - nextList.length;
