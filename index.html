@@ -1218,10 +1218,13 @@ const PANTRY_PATTERNS = [
   { re: /\bseasoning\b/i, label: 'seasoning' },
   { re: /\bspices?\b/i, label: 'spice' },
   { re: /\bdried\s+\w+\s+(herbs|herb)\b/i, label: 'dried herbs' },
-  { re: /\b(rub|blend)\b/i, label: 'rub/blend' },
+  // Narrow: only spice/seasoning rubs and blends — NOT cheese/berry/nut blends.
+  { re: /\b(spice|seasoning|herb|bbq|jerk|cajun|taco|curry|garam|garlic)\s+(rub|blend)\b/i, label: 'rub/blend' },
   { re: /\b\w+\s+vinegar\b/i, label: 'vinegar' },
-  { re: /\b\w+\s+powder\b/i, label: 'powder' },
-  { re: /\b\w+\s+flakes?\b/i, label: 'flakes' },
+  // Narrow: only known spice/baking powders. Stops protein/matcha/espresso powder etc. from being skipped.
+  { re: /\b(garlic|onion|chili|chile|curry|cocoa|baking|ginger|mustard|cayenne|paprika|five[- ]spice|chinese\s+five[- ]spice|chipotle|wasabi|cinnamon)\s+powder\b/i, label: 'powder' },
+  // Narrow: only the actual pantry flake/granule items. Stops coconut/potato/corn flakes etc. from being skipped.
+  { re: /\b(red\s+pepper|chili|chile|onion|garlic|sea\s+salt|kosher\s+salt)\s+flakes?\b/i, label: 'flakes' },
   { re: /\bsalt\b/i, label: 'salt' },
   { re: /\b(black|white|cayenne|ground|cracked|lemon|crushed\s+red|red)\s+peppers?\b/i, label: 'pepper' },
   { re: /\bpeppercorns?\b/i, label: 'pepper' },
@@ -1239,6 +1242,29 @@ const NEVER_STAPLE_PATTERNS = [
   /\b(jalape\w+|serrano|poblano|habanero|anaheim|fresno|thai|banana)\s+peppers?\b/i, // fresh chiles
   /\b(jalape\w+|serrano|poblano|habanero|anaheim|fresno)\b/i,
   /\b(peanut|chili|chile|truffle|walnut|hazelnut)\s+oil\b/i, // specialty oils, not a default-stocked staple
+  // Bare produce names that compound staples falsely claim (avocado → avocado oil,
+  // apple → apple cider vinegar, peanut → peanut butter, etc.). The classifier
+  // already strips reverse phrase matches but these are also defended here so
+  // they survive any future regression and any LLM mis-classification.
+  /^(avocados?|apples?|peanuts?|maple|chocolate|coconut|sesame\s+seeds?|ginger\s+root|fresh\s+ginger|lemons?|limes?|oranges?|grapefruits?)$/i,
+  // Fresh herbs are a different product than the dried staple of the same name.
+  /\bfresh\s+(basil|thyme|rosemary|dill|sage|oregano|cilantro|parsley|mint|chives|tarragon|marjoram)\b/i,
+  // Non-dairy and specialty milks — not the dairy "milk" staple.
+  /\b(coconut|almond|oat|soy|cashew|hemp|rice|condensed|evaporated|sweetened\s+condensed)\s+milk\b/i,
+  // Specialty flours and rice products — not the flour/rice staple.
+  /\b(almond|coconut|cassava|chickpea|gluten[- ]?free|oat|tapioca|tigernut)\s+flour\b/i,
+  /\brice\s+(noodles?|paper|vermicelli|sticks?)\b/i,
+  // Nut/seed butters and dairy variants — not the "butter" staple.
+  /\b(almond|cashew|sunflower|tahini|cocoa)\s+butter\b/i,
+  /\bbutter\s+(lettuce|beans?)\b/i,
+  // Compound dairy products with vanilla — not the vanilla extract staple.
+  /\bvanilla\s+(ice\s+cream|yogurt|pudding|bean|paste|cake)\b/i,
+  // Cheese blends and frozen blends — not the spice "blend" staple.
+  /\b(cheese|cheddar|mozzarella|berry|fruit|smoothie)\s+blend\b/i,
+  /\bblend\s+of\s+cheeses?\b/i,
+  // Green/spring onions are bunched produce, distinct from the "onion" pantry staple.
+  /\b(green|spring)\s+onions?\b/i,
+  /\bscallions?\b/i,
 ];
 function isNeverStaple(name) {
   const lo = (name || '').toLowerCase();
@@ -1278,10 +1304,13 @@ function classifyPantry(pantryStaples) {
     // word appears inside the name (e.g. "red bell pepper" contains "pepper").
     if (isNeverStaple(lo)) return null;
     for (const p of stapleList) {
-      // Bidirectional phrase match: "kosher salt" matches staple "salt"
-      // (staple is a phrase inside ingredient), and ingredient "ginger" matches
-      // staple "ginger powder" (ingredient is a phrase inside staple).
-      if (pantryPhraseMatch(lo, p) || pantryPhraseMatch(p, lo)) return p;
+      // Forward-only phrase match: staple appears as a whole phrase inside the
+      // ingredient ("kosher salt" matches staple "salt"; "garlic clove" matches
+      // "garlic"). Reverse matching was removed because it silently dropped
+      // distinct base ingredients (avocado → avocado oil, apple → apple cider
+      // vinegar, peanut → peanut butter, ginger → ginger powder, etc.) — they
+      // share a word with a pantry product but are not the same item.
+      if (pantryPhraseMatch(lo, p)) return p;
     }
     for (const { re, label } of PANTRY_PATTERNS) {
       if (re.test(lo)) return label;
