@@ -4138,11 +4138,135 @@ function GenerateModal({ existing, totalSelected, weekTitle, onChoose, onClose }
   );
 }
 
+/* ── Shop-online stores (Calgary-relevant) ──
+   No Canadian grocer exposes a public cart API, so "shopping" means deep-
+   linking each item into the store's own search — the user taps an item,
+   the store site opens with that item searched, they add it to their cart
+   there. Checkout/delivery is the store's own; their cookies keep their
+   store location + cart between taps. If a site changes its search path it
+   degrades gracefully (lands on the storefront) — fix the template here. */
+const SHOP_STORES = [
+  { id:'sof',           name:'Save-On-Foods',        url: q => `https://www.saveonfoods.com/sm/pickup/rsid/1982/results?q=${encodeURIComponent(q)}` },
+  { id:'sof-instacart', name:'SOF · Instacart',      url: q => `https://www.instacart.ca/store/save-on-foods/search/${encodeURIComponent(q)}` },
+  { id:'superstore',    name:'Superstore',           url: q => `https://www.realcanadiansuperstore.ca/search?search-bar=${encodeURIComponent(q)}` },
+  { id:'walmart',       name:'Walmart',              url: q => `https://www.walmart.ca/search?q=${encodeURIComponent(q)}` },
+  { id:'voila',         name:'Voilà (Safeway)',      url: q => `https://voila.ca/products/search?q=${encodeURIComponent(q)}` },
+];
+
+/* ── Shop-online bottom sheet ── */
+function ShopSheet({ items, toggle, listText, onClose }) {
+  const [storeId, setStoreId] = usePersistedState('ab.shopStore', 'sof');
+  // Items already tapped this session — tinted so you can see where you are.
+  const [opened, setOpened] = useState(() => ({}));
+  const [msg, setMsg] = useState('');
+  const store = SHOP_STORES.find(s => s.id === storeId) || SHOP_STORES[0];
+  const todo = items.filter(i => !i.done);
+  const flash = (m) => { setMsg(m); setTimeout(() => setMsg(''), 1800); };
+
+  const shopItem = (it) => {
+    window.open(store.url(it.n), '_blank', 'noopener');
+    setOpened(prev => ({ ...prev, [it.n]: true }));
+  };
+
+  const copyList = async () => {
+    try {
+      await navigator.clipboard.writeText(listText);
+      flash('List copied');
+    } catch {
+      // http / older WebView fallback
+      const ta = document.createElement('textarea');
+      ta.value = listText;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); flash('List copied'); }
+      catch { flash('Copy failed'); }
+      document.body.removeChild(ta);
+    }
+  };
+
+  const shareList = () => {
+    if (navigator.share) navigator.share({ text: listText }).catch(() => {});
+    else copyList();
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose} style={{ alignItems:'stretch' }}>
+      <div
+        className="modal-sheet"
+        onClick={e => e.stopPropagation()}
+        style={{ maxHeight:'100%', height:'100%', borderRadius:0 }}
+      >
+        <div className="modal-grabber" />
+        <div className="modal-header">
+          <div className="modal-title">Shop this list</div>
+          <span className="modal-close" onClick={onClose}>×</span>
+        </div>
+
+        {/* Store picker */}
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:10 }}>
+          {SHOP_STORES.map(s => (
+            <div
+              key={s.id}
+              onClick={() => setStoreId(s.id)}
+              className="pill"
+              style={{
+                cursor:'pointer',
+                background: s.id === store.id ? 'var(--purple-mid)' : '#131320',
+                border: `1.5px solid ${s.id === store.id ? 'var(--purple)' : 'var(--border)'}`,
+                color: s.id === store.id ? 'var(--purple-light)' : 'var(--text-dim)',
+              }}
+            >{s.name}</div>
+          ))}
+        </div>
+
+        {/* Copy / share row */}
+        <div style={{ display:'flex', gap:8, marginBottom:10 }}>
+          <div onClick={copyList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📋 Copy list</div>
+          <div onClick={shareList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📤 Share</div>
+        </div>
+        {msg && <div style={{ textAlign:'center', fontSize:13, color:'var(--purple-light)', marginBottom:8 }}>✓ {msg}</div>}
+
+        <div style={{ fontSize:13, color:'var(--text-dimmer)', marginBottom:8 }}>
+          Tap an item → opens {store.name} search in a new tab. Add it to your cart there, then check it off here.
+        </div>
+
+        <div style={{ overflowY:'auto', flex:1, minHeight:0 }}>
+          {todo.length === 0 && (
+            <div style={{ padding:'20px 8px', textAlign:'center', color:'var(--text-dimmer)', fontSize:15 }}>
+              Everything's checked off 🎉
+            </div>
+          )}
+          {todo.map(it => (
+            <div
+              key={it.n}
+              style={{
+                display:'flex', alignItems:'center', gap:10,
+                padding:'11px 8px', borderBottom:'1px dashed var(--border-dim)',
+                background: opened[it.n] ? 'rgba(124,58,237,0.08)' : 'transparent',
+                borderRadius:6,
+              }}
+            >
+              <div className="check-box" onClick={() => toggle(it.n)} style={{ cursor:'pointer', flexShrink:0 }} />
+              <div onClick={() => shopItem(it)} style={{ flex:1, cursor:'pointer', minWidth:0 }}>
+                <span>{it.q && <span className="qty">{it.q}</span>} {it.n}</span>
+                {opened[it.n] && <span style={{ marginLeft:8, fontSize:12, color:'var(--purple-light)' }}>viewed</span>}
+              </div>
+              <span onClick={() => shopItem(it)} style={{ fontSize:16, color:'var(--purple)', cursor:'pointer', padding:'2px 6px' }}>↗</span>
+            </div>
+          ))}
+          <div style={{ height:12 }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples, apiKey, catCache, setCatCache }) {
   const [showDone, setShowDone] = useState(false);
   const [newItemText, setNewItemText] = useState('');
   const [showPantry, setShowPantry] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [showShop, setShowShop] = useState(false);
 
   // LLM is the source of truth for category AND for the "should this even be on
   // the grocery list?" decision (isStaple). The cache (catCache) holds Claude's
@@ -4267,6 +4391,21 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
   const doneCount = items.filter(i => i.done).length;
   const totalCount = items.length;
 
+  // Plain-text export of the unchecked list, grouped by category — for the
+  // copy/share buttons in ShopSheet. Pastes cleanly into notes, texts, or
+  // any grocery app's list feature.
+  const listAsText = () => {
+    const d = new Date();
+    const lines = [`Groceries · ${MONTHS[d.getMonth()]} ${d.getDate()}`];
+    cats.forEach(cat => {
+      const catItems = items.filter(i => !i.done && resolveCat(i.n) === cat);
+      if (!catItems.length) return;
+      lines.push('', cat);
+      catItems.forEach(i => lines.push(`• ${i.q ? i.q + ' ' : ''}${i.n}`));
+    });
+    return lines.join('\n');
+  };
+
   return (
     <div className="screen-body">
       <div className="screen-header">
@@ -4374,10 +4513,19 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       </div>
 
       <div className="btn-wrap">
-        <div className="gen-btn">🛒 Send to Instacart</div>
+        <div className="gen-btn" onClick={() => setShowShop(true)}>🛒 Shop this list</div>
       </div>
 
       <TabBar active={1} onTab={onTab} />
+
+      {showShop && (
+        <ShopSheet
+          items={items}
+          toggle={toggle}
+          listText={listAsText()}
+          onClose={() => setShowShop(false)}
+        />
+      )}
 
       {showPantry && (
         <PantrySheet
