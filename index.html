@@ -447,7 +447,15 @@ body {
   margin-bottom: 10px;
 }
 .modal-title { font-size: 22px; font-weight: 700; color: var(--text); font-family: var(--font); }
-.modal-close { font-size: 24px; color: var(--text-dimmer); cursor: pointer; padding: 0 4px; }
+/* 44px-ish tap target (Apple HIG) — negative margin keeps layout unchanged */
+.modal-close { font-size: 24px; color: var(--text-dimmer); cursor: pointer; padding: 10px 14px; margin: -10px -14px -10px -10px; }
+/* Full-screen sheets must clear the iOS notch/status-bar zone, or their
+   header (and close button) sits under the Dynamic Island where taps
+   don't land. env() is 0 on desktop so this is a no-op there. */
+.modal-sheet.fullscreen {
+  max-height: 100%; height: 100%; border-radius: 0;
+  padding-top: calc(env(safe-area-inset-top, 0px) + 14px);
+}
 .recipe-pick-row {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 10px;
@@ -3166,9 +3174,8 @@ function RecipeSheet({ slot, onPick, onClose, recipeDB }) {
     // versus a bottom-anchored sheet where the keyboard covers the list.
     <div className="modal-backdrop" onClick={onClose} style={{ alignItems:'stretch' }}>
       <div
-        className="modal-sheet"
+        className="modal-sheet fullscreen"
         onClick={e => e.stopPropagation()}
-        style={{ maxHeight:'100%', height:'100%', borderRadius:0 }}
       >
         <div className="modal-grabber" />
         <div className="modal-header">
@@ -4192,9 +4199,8 @@ function ShopSheet({ items, toggle, listText, onClose }) {
   return (
     <div className="modal-backdrop" onClick={onClose} style={{ alignItems:'stretch' }}>
       <div
-        className="modal-sheet"
+        className="modal-sheet fullscreen"
         onClick={e => e.stopPropagation()}
-        style={{ maxHeight:'100%', height:'100%', borderRadius:0 }}
       >
         <div className="modal-grabber" />
         <div className="modal-header">
@@ -4255,6 +4261,12 @@ function ShopSheet({ items, toggle, listText, onClose }) {
             </div>
           ))}
           <div style={{ height:12 }} />
+        </div>
+
+        {/* Thumb-reachable exit — the sheet covers the backdrop, so without
+            this the tiny top ✕ is the only way out. */}
+        <div className="btn-wrap" style={{ padding:'10px 0 4px' }}>
+          <div className="gen-btn" onClick={onClose}>Done</div>
         </div>
       </div>
     </div>
