@@ -4161,7 +4161,7 @@ const SHOP_STORES = [
 ];
 
 /* ── Shop-online bottom sheet ── */
-function ShopSheet({ items, toggle, listText, onClose }) {
+function ShopSheet({ items, toggle, listText, plainText, onClose }) {
   const [storeId, setStoreId] = usePersistedState('ab.shopStore', 'sof');
   // Items already tapped this session — tinted so you can see where you are.
   const [opened, setOpened] = useState(() => ({}));
@@ -4175,21 +4175,26 @@ function ShopSheet({ items, toggle, listText, onClose }) {
     setOpened(prev => ({ ...prev, [it.n]: true }));
   };
 
-  const copyList = async () => {
+  const copyText = async (text, okMsg) => {
     try {
-      await navigator.clipboard.writeText(listText);
-      flash('List copied');
+      await navigator.clipboard.writeText(text);
+      flash(okMsg);
     } catch {
       // http / older WebView fallback
       const ta = document.createElement('textarea');
-      ta.value = listText;
+      ta.value = text;
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand('copy'); flash('List copied'); }
+      try { document.execCommand('copy'); flash(okMsg); }
       catch { flash('Copy failed'); }
       document.body.removeChild(ta);
     }
   };
+
+  const copyList = () => copyText(listText, 'List copied');
+  // Bare items, one per line — Instacart's iOS app "Lists" feature parses a
+  // pasted block into products; headers/bullets would be read as items.
+  const copyForApps = () => copyText(plainText, 'Copied — paste into Instacart’s Lists tab');
 
   const shareList = () => {
     if (navigator.share) navigator.share({ text: listText }).catch(() => {});
@@ -4227,7 +4232,8 @@ function ShopSheet({ items, toggle, listText, onClose }) {
 
         {/* Copy / share row */}
         <div style={{ display:'flex', gap:8, marginBottom:10 }}>
-          <div onClick={copyList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📋 Copy list</div>
+          <div onClick={copyList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📋 Copy</div>
+          <div onClick={copyForApps} style={{ flex:1.4, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--purple-bg)', background:'#131320', color:'var(--purple-light)', fontSize:15, cursor:'pointer' }}>🥕 For Instacart</div>
           <div onClick={shareList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📤 Share</div>
         </div>
         {msg && <div style={{ textAlign:'center', fontSize:13, color:'var(--purple-light)', marginBottom:8 }}>✓ {msg}</div>}
@@ -4418,6 +4424,11 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
     return lines.join('\n');
   };
 
+  // Bare "qty name" lines with no headers or bullets — the paste-import
+  // format grocery apps (Instacart Lists) parse into products.
+  const listAsPlainText = () =>
+    items.filter(i => !i.done).map(i => `${i.q ? i.q + ' ' : ''}${i.n}`).join('\n');
+
   return (
     <div className="screen-body">
       <div className="screen-header">
@@ -4535,6 +4546,7 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
           items={items}
           toggle={toggle}
           listText={listAsText()}
+          plainText={listAsPlainText()}
           onClose={() => setShowShop(false)}
         />
       )}
