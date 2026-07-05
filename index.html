@@ -2940,8 +2940,26 @@ function ScrollNudges() {
 }
 
 function Phone({ children }) {
+  // Desktop: scale the fixed 375×780 frame up to fill the window height so
+  // the app is comfortably readable on a monitor instead of a tiny mockup.
+  // Mobile / installed-PWA keeps the full-screen CSS (max-width 480px or
+  // standalone display-mode) — scale stays 1 there and transform is a no-op.
+  // Cap at 1.6 so a 4K monitor doesn't render a comically large phone.
+  const [scale, setScale] = useState(1);
+  useEffect(() => {
+    const compute = () => {
+      const standalone = window.matchMedia('(display-mode: standalone)').matches;
+      if (standalone || window.innerWidth <= 480) { setScale(1); return; }
+      const fitH = (window.innerHeight - 40) / 780;
+      const fitW = (window.innerWidth - 40) / 375;
+      setScale(Math.max(1, Math.min(1.6, fitH, fitW)));
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    return () => window.removeEventListener('resize', compute);
+  }, []);
   return (
-    <div className="phone">
+    <div className="phone" style={scale !== 1 ? { transform:`scale(${scale})`, transformOrigin:'center center' } : null}>
       <div className="notch" />
       <div className="status-bar"></div>
       {children}
@@ -4154,14 +4172,13 @@ function GenerateModal({ existing, totalSelected, weekTitle, onChoose, onClose }
    degrades gracefully (lands on the storefront) — fix the template here. */
 const SHOP_STORES = [
   { id:'sof',           name:'Save-On-Foods',        url: q => `https://www.saveonfoods.com/sm/pickup/rsid/1982/results?q=${encodeURIComponent(q)}` },
-  { id:'sof-instacart', name:'SOF · Instacart',      url: q => `https://www.instacart.ca/store/save-on-foods/search/${encodeURIComponent(q)}` },
   { id:'superstore',    name:'Superstore',           url: q => `https://www.realcanadiansuperstore.ca/search?search-bar=${encodeURIComponent(q)}` },
   { id:'walmart',       name:'Walmart',              url: q => `https://www.walmart.ca/search?q=${encodeURIComponent(q)}` },
   { id:'voila',         name:'Voilà (Safeway)',      url: q => `https://voila.ca/products/search?q=${encodeURIComponent(q)}` },
 ];
 
 /* ── Shop-online bottom sheet ── */
-function ShopSheet({ items, toggle, listText, plainText, onClose }) {
+function ShopSheet({ items, toggle, listText, onClose }) {
   const [storeId, setStoreId] = usePersistedState('ab.shopStore', 'sof');
   // Items already tapped this session — tinted so you can see where you are.
   const [opened, setOpened] = useState(() => ({}));
@@ -4192,9 +4209,6 @@ function ShopSheet({ items, toggle, listText, plainText, onClose }) {
   };
 
   const copyList = () => copyText(listText, 'List copied');
-  // Bare items, one per line — Instacart's iOS app "Lists" feature parses a
-  // pasted block into products; headers/bullets would be read as items.
-  const copyForApps = () => copyText(plainText, 'Copied — paste into Instacart’s Lists tab');
 
   const shareList = () => {
     if (navigator.share) navigator.share({ text: listText }).catch(() => {});
@@ -4232,8 +4246,7 @@ function ShopSheet({ items, toggle, listText, plainText, onClose }) {
 
         {/* Copy / share row */}
         <div style={{ display:'flex', gap:8, marginBottom:10 }}>
-          <div onClick={copyList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📋 Copy</div>
-          <div onClick={copyForApps} style={{ flex:1.4, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--purple-bg)', background:'#131320', color:'var(--purple-light)', fontSize:15, cursor:'pointer' }}>🥕 For Instacart</div>
+          <div onClick={copyList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📋 Copy list</div>
           <div onClick={shareList} style={{ flex:1, textAlign:'center', padding:'10px 0', borderRadius:8, border:'1.5px solid var(--border)', background:'#131320', color:'#bbb', fontSize:15, cursor:'pointer' }}>📤 Share</div>
         </div>
         {msg && <div style={{ textAlign:'center', fontSize:13, color:'var(--purple-light)', marginBottom:8 }}>✓ {msg}</div>}
@@ -4424,10 +4437,6 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
     return lines.join('\n');
   };
 
-  // Bare "qty name" lines with no headers or bullets — the paste-import
-  // format grocery apps (Instacart Lists) parse into products.
-  const listAsPlainText = () =>
-    items.filter(i => !i.done).map(i => `${i.q ? i.q + ' ' : ''}${i.n}`).join('\n');
 
   return (
     <div className="screen-body">
@@ -4546,7 +4555,6 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
           items={items}
           toggle={toggle}
           listText={listAsText()}
-          plainText={listAsPlainText()}
           onClose={() => setShowShop(false)}
         />
       )}
