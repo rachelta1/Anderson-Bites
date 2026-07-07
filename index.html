@@ -3882,7 +3882,7 @@ function RecipePeekSheet({ recipe, onClose }) {
    to the existing-meals overwrite/append flow (or directly applies the
    plan if no day conflicts). Recipe rows are tappable → opens RecipePeekSheet
    layered on top so the user can inspect a dish before confirming/rerolling. ── */
-function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, rerolling, rerollSeed }) {
+function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed }) {
   // Lookup table from weekOffset+slotIdx → friendly day chip ({ label, n, month, d })
   const dayInfoFor = (weekOffset, slotIdx) => {
     const wk = weekMap && weekMap[weekOffset];
@@ -3941,6 +3941,25 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
 
   const confirm = () => onConfirm(excluded);
 
+  // Move mode: slotKey whose dinner is being relocated. Renders a day-chip
+  // strip under that card; tapping a chip swaps dinners with the target day.
+  const [moving, setMoving] = useState(null);
+  const doMove = (fromKey, toKey) => {
+    if (onMoveDinner) onMoveDinner(fromKey, toKey);
+    // The lock travels with the dinner, not the day — locking "keep tacos"
+    // then moving tacos to Friday should still protect tacos on reroll.
+    setKeptKeys(prev => {
+      const next = new Set(prev);
+      const fromKept = next.has(fromKey), toKept = next.has(toKey);
+      if (fromKept !== toKept) {
+        if (fromKept) { next.delete(fromKey); next.add(toKey); }
+        else { next.delete(toKey); next.add(fromKey); }
+      }
+      return next;
+    });
+    setMoving(null);
+  };
+
   return (
     <>
     <div className="modal-backdrop" onClick={onCancel}>
@@ -3973,21 +3992,68 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                 }}>
                   <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
                     <div style={{ fontSize:13, color:'var(--purple-light)', fontWeight:600 }}>{dayLabel}</div>
-                    {hasDinner && onReroll && (
-                      <span
-                        onClick={() => toggleKeep(slotKey)}
-                        title={isKept ? 'Unlock — reroll will replace this dinner' : 'Keep this dinner when rerolling'}
-                        style={{
-                          fontSize:15, fontWeight:600, cursor:'pointer', userSelect:'none',
-                          padding:'7px 14px', borderRadius:8,
-                          background: isKept ? 'var(--purple-mid)' : 'transparent',
-                          border: `1.5px solid ${isKept ? 'var(--purple)' : 'var(--border)'}`,
-                          color: isKept ? 'var(--purple-light)' : 'var(--text-dimmer)',
-                          minHeight:34, display:'inline-flex', alignItems:'center', gap:4,
-                        }}
-                      >{isKept ? '🔒 keep' : '🔓 keep'}</span>
-                    )}
+                    <div style={{ display:'flex', gap:6 }}>
+                      {hasDinner && onMoveDinner && ordered.length > 1 && (
+                        <span
+                          onClick={() => setMoving(moving === slotKey ? null : slotKey)}
+                          title="Move this dinner to a different day"
+                          style={{
+                            fontSize:15, fontWeight:600, cursor:'pointer', userSelect:'none',
+                            padding:'7px 14px', borderRadius:8,
+                            background: moving === slotKey ? 'var(--purple-mid)' : 'transparent',
+                            border: `1.5px solid ${moving === slotKey ? 'var(--purple)' : 'var(--border)'}`,
+                            color: moving === slotKey ? 'var(--purple-light)' : 'var(--text-dimmer)',
+                            minHeight:34, display:'inline-flex', alignItems:'center', gap:4,
+                          }}
+                        >⇄ move</span>
+                      )}
+                      {hasDinner && onReroll && (
+                        <span
+                          onClick={() => toggleKeep(slotKey)}
+                          title={isKept ? 'Unlock — reroll will replace this dinner' : 'Keep this dinner when rerolling'}
+                          style={{
+                            fontSize:15, fontWeight:600, cursor:'pointer', userSelect:'none',
+                            padding:'7px 14px', borderRadius:8,
+                            background: isKept ? 'var(--purple-mid)' : 'transparent',
+                            border: `1.5px solid ${isKept ? 'var(--purple)' : 'var(--border)'}`,
+                            color: isKept ? 'var(--purple-light)' : 'var(--text-dimmer)',
+                            minHeight:34, display:'inline-flex', alignItems:'center', gap:4,
+                          }}
+                        >{isKept ? '🔒 keep' : '🔓 keep'}</span>
+                      )}
+                    </div>
                   </div>
+                  {moving === slotKey && (
+                    <div style={{ margin:'2px 0 8px' }}>
+                      <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:6 }}>
+                        Move <span style={{ color:'#ddd' }}>{dinner.name}</span> to:
+                      </div>
+                      <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+                        {ordered.filter(o => `${o.weekOffset}-${o.slotIdx}` !== slotKey).map(o => {
+                          const tKey = `${o.weekOffset}-${o.slotIdx}`;
+                          const tInfo = dayInfoFor(o.weekOffset, o.slotIdx);
+                          const tLabel = tInfo ? `${tInfo.d} ${tInfo.n}` : o.dt;
+                          const willSwap = !!(o.dinner && o.dinner.name);
+                          return (
+                            <div
+                              key={tKey}
+                              onClick={() => doMove(slotKey, tKey)}
+                              title={willSwap ? `Swaps with ${o.dinner.name}` : 'Day is free'}
+                              style={{
+                                padding:'8px 12px', borderRadius:8, cursor:'pointer',
+                                background:'#131320', border:'1.5px solid var(--border)',
+                                color:'var(--text-sec)', fontSize:14, fontWeight:600,
+                                display:'flex', flexDirection:'column', alignItems:'center', gap:1, minWidth:52,
+                              }}
+                            >
+                              <span>{tLabel}</span>
+                              {willSwap && <span style={{ fontSize:10, color:'var(--text-dimmer)', fontWeight:400 }}>⇄ swap</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                   {bfList.map((b, i) => {
                     const peekable = isPeekable(b);
                     return (
@@ -6552,6 +6618,22 @@ function AutoPlanScreen({
   // existing-day collisions and either opens the overwrite/append modal or
   // applies the plan directly. excludedStaples is the Set of lowercased
   // ingredient names the user opted back onto the grocery list.
+  // Move a dinner between two plan days inside the preview (before confirm).
+  // Swap semantics: if the target day already has a dinner they trade places,
+  // so every selected day keeps a dinner. Breakfasts and tasks stay anchored
+  // to their days (laundry Thursday stays Thursday).
+  const movePreviewDinner = (fromKey, toKey) => {
+    setPreviewModal(prev => {
+      if (!prev) return prev;
+      const perDay = prev.perDay.map(p => ({ ...p }));
+      const f = perDay.find(p => `${p.weekOffset}-${p.slotIdx}` === fromKey);
+      const t = perDay.find(p => `${p.weekOffset}-${p.slotIdx}` === toKey);
+      if (!f || !t) return prev;
+      const tmp = f.dinner; f.dinner = t.dinner; t.dinner = tmp;
+      return { ...prev, perDay };
+    });
+  };
+
   const confirmPreview = (excludedStaples) => {
     if (!previewModal) return;
     const { perDay } = previewModal;
@@ -6721,6 +6803,7 @@ function AutoPlanScreen({
           onConfirm={confirmPreview}
           onCancel={() => setPreviewModal(null)}
           onReroll={handleReroll}
+          onMoveDinner={movePreviewDinner}
           rerolling={genLoading}
           rerollSeed={rerollSeed}
         />
