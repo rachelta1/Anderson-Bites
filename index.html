@@ -3941,9 +3941,6 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
 
   const confirm = () => onConfirm(excluded);
 
-  // Move mode: slotKey whose dinner is being relocated. Renders a day-chip
-  // strip under that card; tapping a chip swaps dinners with the target day.
-  const [moving, setMoving] = useState(null);
   const doMove = (fromKey, toKey) => {
     if (onMoveDinner) onMoveDinner(fromKey, toKey);
     // The lock travels with the dinner, not the day — locking "keep tacos"
@@ -3957,19 +3954,77 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
       }
       return next;
     });
-    setMoving(null);
+  };
+
+  // ── Drag-and-drop dinner rearranging ──
+  // Pointer-events based (HTML5 drag doesn't fire on iOS touch). Grab the ⠿
+  // handle on a dinner row, drag over another day card, release to swap.
+  // touch-action:none on the handle stops the scroll gesture from stealing
+  // the drag; pointer capture keeps move/up events on the handle even when
+  // the finger leaves it.
+  const [drag, setDrag] = useState(null); // { fromKey, name, x, y, overKey } — x/y sheet-local
+  const scrollRef = useRef(null);
+  const sheetRef = useRef(null);
+
+  // Viewport → sheet-local coords. The desktop phone frame is scaled with a
+  // CSS transform, so clientX/Y can't be used directly for the ghost.
+  const toLocal = (clientX, clientY) => {
+    const el = sheetRef.current;
+    if (!el) return { x: clientX, y: clientY };
+    const r = el.getBoundingClientRect();
+    const sx = r.width / el.offsetWidth || 1;
+    const sy = r.height / el.offsetHeight || 1;
+    return { x: (clientX - r.left) / sx, y: (clientY - r.top) / sy };
+  };
+
+  const dragStart = (e, slotKey, name) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    setDrag({ fromKey: slotKey, name, ...toLocal(e.clientX, e.clientY), overKey: null });
+  };
+  const dragMove = (e) => {
+    if (!drag) return;
+    // Hit-test with viewport coords (elementFromPoint is viewport-based and
+    // handles the scale transform for us).
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const card = el && el.closest('[data-slotkey]');
+    const overKey = card ? card.getAttribute('data-slotkey') : null;
+    setDrag(d => d ? { ...d, ...toLocal(e.clientX, e.clientY), overKey: overKey === d.fromKey ? null : overKey } : d);
+    // Auto-scroll the day list when dragging near its edges.
+    const sc = scrollRef.current;
+    if (sc) {
+      const r = sc.getBoundingClientRect();
+      if (e.clientY < r.top + 56) sc.scrollTop -= 10;
+      else if (e.clientY > r.bottom - 56) sc.scrollTop += 10;
+    }
+  };
+  const dragEnd = () => {
+    if (drag && drag.overKey && drag.overKey !== drag.fromKey) doMove(drag.fromKey, drag.overKey);
+    setDrag(null);
   };
 
   return (
     <>
     <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal-sheet" onClick={e => e.stopPropagation()} style={{ maxHeight:'85%' }}>
+      <div className="modal-sheet" ref={sheetRef} onClick={e => e.stopPropagation()} style={{ maxHeight:'85%', position:'relative' }}>
         <div className="modal-grabber" />
         <div className="modal-header">
           <div className="modal-title">{weekTitle ? `${weekTitle}'s plan` : 'Proposed plan'}</div>
           <span className="modal-close" onClick={onCancel}>×</span>
         </div>
-        <div style={{ overflowY:'auto', overflowX:'hidden', flex:1, paddingRight:2 }}>
+        {drag && (
+          <div style={{
+            position:'absolute', left: drag.x, top: drag.y,
+            transform:'translate(-50%, -120%)',
+            pointerEvents:'none', zIndex: 20,
+            background:'var(--purple-mid)', border:'1.5px solid var(--purple)',
+            borderRadius:8, padding:'6px 12px', fontSize:14, color:'#eee',
+            boxShadow:'0 6px 18px rgba(0,0,0,0.5)', whiteSpace:'nowrap', maxWidth:260,
+            overflow:'hidden', textOverflow:'ellipsis',
+          }}>🌙 {drag.name}</div>
+        )}
+        <div ref={scrollRef} style={{ overflowY:'auto', overflowX:'hidden', flex:1, paddingRight:2 }}>
           <div style={{ fontSize:13, color:'var(--text-dimmer)', marginBottom:8 }}>
             Here's what I picked. Review before I write it to your week.
           </div>
@@ -3983,77 +4038,41 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
               const slotKey = `${weekOffset}-${slotIdx}`;
               const isKept = keptKeys.has(slotKey);
               const hasDinner = !!(dinner && dinner.name);
+              const isDragSource = drag && drag.fromKey === slotKey;
+              const isDropTarget = drag && drag.overKey === slotKey;
               return (
-                <div key={slotKey} style={{
-                  background:'var(--card)',
-                  border:`1px solid ${isKept ? 'var(--purple)' : 'var(--border-dim)'}`,
+                <div key={slotKey} data-slotkey={slotKey} style={{
+                  background: isDropTarget ? 'rgba(124,58,237,0.14)' : 'var(--card)',
+                  border:`1px solid ${isDropTarget ? 'var(--purple)' : isKept ? 'var(--purple)' : 'var(--border-dim)'}`,
                   borderRadius:10, padding:'8px 10px',
-                  boxShadow: isKept ? '0 0 0 1px var(--purple-mid) inset' : 'none',
+                  boxShadow: isDropTarget ? '0 0 0 1px var(--purple) inset' : isKept ? '0 0 0 1px var(--purple-mid) inset' : 'none',
+                  opacity: isDragSource ? 0.45 : 1,
+                  transition:'background 120ms, border-color 120ms',
                 }}>
                   <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
-                    <div style={{ fontSize:13, color:'var(--purple-light)', fontWeight:600 }}>{dayLabel}</div>
-                    <div style={{ display:'flex', gap:6 }}>
-                      {hasDinner && onMoveDinner && ordered.length > 1 && (
-                        <span
-                          onClick={() => setMoving(moving === slotKey ? null : slotKey)}
-                          title="Move this dinner to a different day"
-                          style={{
-                            fontSize:15, fontWeight:600, cursor:'pointer', userSelect:'none',
-                            padding:'7px 14px', borderRadius:8,
-                            background: moving === slotKey ? 'var(--purple-mid)' : 'transparent',
-                            border: `1.5px solid ${moving === slotKey ? 'var(--purple)' : 'var(--border)'}`,
-                            color: moving === slotKey ? 'var(--purple-light)' : 'var(--text-dimmer)',
-                            minHeight:34, display:'inline-flex', alignItems:'center', gap:4,
-                          }}
-                        >⇄ move</span>
-                      )}
-                      {hasDinner && onReroll && (
-                        <span
-                          onClick={() => toggleKeep(slotKey)}
-                          title={isKept ? 'Unlock — reroll will replace this dinner' : 'Keep this dinner when rerolling'}
-                          style={{
-                            fontSize:15, fontWeight:600, cursor:'pointer', userSelect:'none',
-                            padding:'7px 14px', borderRadius:8,
-                            background: isKept ? 'var(--purple-mid)' : 'transparent',
-                            border: `1.5px solid ${isKept ? 'var(--purple)' : 'var(--border)'}`,
-                            color: isKept ? 'var(--purple-light)' : 'var(--text-dimmer)',
-                            minHeight:34, display:'inline-flex', alignItems:'center', gap:4,
-                          }}
-                        >{isKept ? '🔒 keep' : '🔓 keep'}</span>
+                    <div style={{ fontSize:13, color:'var(--purple-light)', fontWeight:600 }}>
+                      {dayLabel}
+                      {isDropTarget && (
+                        <span style={{ marginLeft:8, fontSize:12, color:'var(--purple-light)' }}>
+                          {hasDinner ? '⇄ release to swap' : '⌄ release to drop'}
+                        </span>
                       )}
                     </div>
+                    {hasDinner && onReroll && (
+                      <span
+                        onClick={() => toggleKeep(slotKey)}
+                        title={isKept ? 'Unlock — reroll will replace this dinner' : 'Keep this dinner when rerolling'}
+                        style={{
+                          fontSize:15, fontWeight:600, cursor:'pointer', userSelect:'none',
+                          padding:'7px 14px', borderRadius:8,
+                          background: isKept ? 'var(--purple-mid)' : 'transparent',
+                          border: `1.5px solid ${isKept ? 'var(--purple)' : 'var(--border)'}`,
+                          color: isKept ? 'var(--purple-light)' : 'var(--text-dimmer)',
+                          minHeight:34, display:'inline-flex', alignItems:'center', gap:4,
+                        }}
+                      >{isKept ? '🔒 keep' : '🔓 keep'}</span>
+                    )}
                   </div>
-                  {moving === slotKey && (
-                    <div style={{ margin:'2px 0 8px' }}>
-                      <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:6 }}>
-                        Move <span style={{ color:'#ddd' }}>{dinner.name}</span> to:
-                      </div>
-                      <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
-                        {ordered.filter(o => `${o.weekOffset}-${o.slotIdx}` !== slotKey).map(o => {
-                          const tKey = `${o.weekOffset}-${o.slotIdx}`;
-                          const tInfo = dayInfoFor(o.weekOffset, o.slotIdx);
-                          const tLabel = tInfo ? `${tInfo.d} ${tInfo.n}` : o.dt;
-                          const willSwap = !!(o.dinner && o.dinner.name);
-                          return (
-                            <div
-                              key={tKey}
-                              onClick={() => doMove(slotKey, tKey)}
-                              title={willSwap ? `Swaps with ${o.dinner.name}` : 'Day is free'}
-                              style={{
-                                padding:'8px 12px', borderRadius:8, cursor:'pointer',
-                                background:'#131320', border:'1.5px solid var(--border)',
-                                color:'var(--text-sec)', fontSize:14, fontWeight:600,
-                                display:'flex', flexDirection:'column', alignItems:'center', gap:1, minWidth:52,
-                              }}
-                            >
-                              <span>{tLabel}</span>
-                              {willSwap && <span style={{ fontSize:10, color:'var(--text-dimmer)', fontWeight:400 }}>⇄ swap</span>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
                   {bfList.map((b, i) => {
                     const peekable = isPeekable(b);
                     return (
@@ -4080,6 +4099,23 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                         <span style={{ width:14 }}>🌙</span>
                         <span style={{ flex:1, textDecoration: peekable ? 'underline dotted var(--purple-bg)' : 'none', textUnderlineOffset:'3px' }}>{dinner.name}</span>
                         {peekable && <span style={{ color:'var(--text-dimmer)', fontSize:13 }}>›</span>}
+                        {onMoveDinner && ordered.length > 1 && (
+                          <span
+                            onPointerDown={(e) => dragStart(e, slotKey, dinner.name)}
+                            onPointerMove={dragMove}
+                            onPointerUp={dragEnd}
+                            onPointerCancel={dragEnd}
+                            onClick={(e) => e.stopPropagation()}
+                            title="Drag to another day"
+                            style={{
+                              touchAction:'none', cursor: drag ? 'grabbing' : 'grab',
+                              userSelect:'none', WebkitUserSelect:'none',
+                              padding:'8px 10px', margin:'-6px -4px -6px 0',
+                              fontSize:17, color:'var(--text-dimmer)', lineHeight:1,
+                              borderRadius:8,
+                            }}
+                          >⠿</span>
+                        )}
                       </div>
                     );
                   })()}
