@@ -3700,7 +3700,7 @@ function parseItem(text) {
   const NUM = '(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?|[½⅓⅔¼¾⅛⅜⅝⅞⅕⅖⅗⅘⅙⅚])';
   // Unit tokens that count as part of the qty (optional). Plural variants
   // included so "2 cans" parses as one qty token, not "2" + name "cans".
-  const UNIT = '\\s*(?:lb|lbs|oz|kg|g|cup|cups|tbsp|tsp|jar|jars|box|boxes|bag|bags|can|cans|bottle|bottles|bunch|bunches|head|heads|cloves?|pkg|stick|sticks|inch|in|pinch|dash)?';
+  const UNIT = '\\s*(?:pounds?|lb|lbs|ounces?|oz|kg|grams?|g|cups?|tablespoons?|tbsp|teaspoons?|tsp|jars?|box(?:es)?|bags?|cans?|bottles?|bunch(?:es)?|heads?|cloves?|packages?|pkg|sticks?|slices?|pieces?|fillets?|liters?|litres?|ml|inch|in|pinch|dash)?';
   // Inline parenthetical sizing like "(15 oz)" common in canned goods.
   const PAREN = '(?:\\s*\\([^)]*\\))?';
   // Some sites write "2 (15 oz) cans tomatoes" — the trailing unit lives
@@ -5500,7 +5500,7 @@ function AddToCalendarSheet({ recipe, weekMap, setWeekMap, onClose, onDone }) {
 /* ═══════════════════════════════════════════
    SCREEN: RECIPE DETAIL
 ═══════════════════════════════════════════ */
-function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB, groceryList, setGroceryList }) {
+function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB, groceryList, setGroceryList, pantryStaples }) {
   const r = recipe || (recipeDB && recipeDB[0]) || {};
   const [showCal, setShowCal] = useState(false);
   const [toast, setToast] = useState('');
@@ -5580,6 +5580,36 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     }
     setTimeout(() => setToast(''), 1500);
   };
+
+  // One-tap "everything for this recipe onto the grocery list". Skips pantry
+  // staples (salt, olive oil, …) the same way the auto-planner does, and
+  // skips items already on the list, so tapping twice can't double up.
+  const addAllToGrocery = () => {
+    if (!setGroceryList) return;
+    const isPantry = makeIsPantry(pantryStaples);
+    let added = 0, skippedPantry = 0, alreadyOn = 0;
+    ingredients.forEach((ing, i) => {
+      if (!ing) return;
+      // Derive the SAME list key toggleIng will use (qty stripped from the
+      // raw line) — checking the bare ingredient name against the list would
+      // miss items stored under their parsed name, and re-tapping would then
+      // toggle them OFF instead of skipping.
+      const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
+      const parsed = raw ? parseItem(raw) : { n: ing };
+      const key = ((parsed.n || ing) || '').trim().toLowerCase();
+      if (groceryNames.has(key)) { alreadyOn++; return; }
+      if (isPantry(ing)) { skippedPantry++; return; }
+      toggleIng(i);
+      added++;
+    });
+    const parts = [];
+    if (added) parts.push(`Added ${added} to grocery list`);
+    if (skippedPantry) parts.push(`${skippedPantry} pantry skipped`);
+    if (!added) parts.unshift(alreadyOn ? 'Already on your list' : 'Nothing to add');
+    setToast(parts.join(' · '));
+    setTimeout(() => setToast(''), 2500);
+  };
+
   const mealKind = (r.tags || []).includes('breakfast') ? 'breakfast'
                  : (r.tags || []).includes('dessert') ? 'dessert'
                  : (r.tags || []).includes('soup') ? 'soup'
@@ -5924,7 +5954,16 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
         {toast && (
           <div style={{ textAlign:'center', fontSize:13, color:'var(--purple-light)', marginBottom:8 }}>✓ {toast}</div>
         )}
-        <div className="gen-btn" onClick={() => setShowCal(true)}>+ Add to Calendar</div>
+        <div style={{ display:'flex', gap:8 }}>
+          {setGroceryList && ingredients.length > 0 && (
+            <div
+              className="gen-btn"
+              onClick={addAllToGrocery}
+              style={{ flex:1, background:'#202030', color:'var(--purple-light)', border:'1.5px solid var(--border)' }}
+            >🛒 Add to grocery list</div>
+          )}
+          <div className="gen-btn" onClick={() => setShowCal(true)} style={{ flex:1 }}>+ Add to Calendar</div>
+        </div>
       </div>
 
       {showCal && (
@@ -7011,6 +7050,7 @@ function App() {
         setRecipeDB={setRecipeDB}
         groceryList={groceryList}
         setGroceryList={setGroceryList}
+        pantryStaples={pantryStaples}
       />;
     }
     if (subscreen === 'add-recipe') {
