@@ -3323,7 +3323,10 @@ function TaskSheet({ initial, onSave, onClose }) {
 }
 
 /* ── Move-to-day picker ── */
-function MoveDaySheet({ weekData, currentIdx, mealName, onMove, onClose }) {
+function MoveDaySheet({ weekMap, currentOffset, currentIdx, mealName, onMove, onClose }) {
+  // Browse any week with ‹ › — starts on the week the meal is currently in.
+  const [offset, setOffset] = useState(currentOffset);
+  const week = mergeWeek(buildWeek(offset), weekMap ? weekMap[offset] : null);
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
@@ -3332,17 +3335,25 @@ function MoveDaySheet({ weekData, currentIdx, mealName, onMove, onClose }) {
           <div className="modal-title">Move to…</div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
-        <div style={{ fontSize:15, color:'var(--text-dim)', padding:'0 2px 12px' }}>
+        <div style={{ fontSize:15, color:'var(--text-dim)', padding:'0 2px 10px' }}>
           {mealName}
         </div>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:10, padding:'0 2px 10px' }}>
+          <span style={{ fontSize:26, color:'var(--purple)', cursor:'pointer', padding:'0 10px' }} onClick={() => setOffset(offset - 1)}>‹</span>
+          <span style={{ fontSize:16, color:'#aaa', minWidth:150, textAlign:'center' }}>
+            {weekRangeLabel(offset)}
+            {offset === currentOffset && <span style={{ display:'block', fontSize:11, color:'var(--text-dimmer)' }}>current week</span>}
+          </span>
+          <span style={{ fontSize:26, color:'var(--purple)', cursor:'pointer', padding:'0 10px' }} onClick={() => setOffset(offset + 1)}>›</span>
+        </div>
         <div style={{ display:'flex', gap:6, padding:'0 2px 14px' }}>
-          {weekData.map((d, i) => {
-            const disabled = i === currentIdx;
+          {week.map((d, i) => {
+            const disabled = offset === currentOffset && i === currentIdx;
             return (
               <div
                 key={i}
                 className="day-chip"
-                onClick={disabled ? null : () => onMove(i)}
+                onClick={disabled ? null : () => onMove(offset, i)}
                 style={{
                   flex:'1 1 0',
                   minWidth:0,
@@ -3380,7 +3391,7 @@ function dayHasContent(d) {
   return !!(d && d.meals && ((d.meals.b && d.meals.b.length) || d.meals.d || (d.meals.snacks && d.meals.snacks.length) || (d.tasks && d.tasks.length)));
 }
 
-function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, recipeDB, onMealClick }) {
+function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, weekMap, setWeekMap, recipeDB, onMealClick }) {
   const [selected, setSelected] = useState(() => {
     const idx = weekData.findIndex(d => d.today);
     return idx >= 0 ? idx : 0;
@@ -3449,12 +3460,38 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
     });
   };
 
-  // Move a meal from the currently-selected day to a different day in the
-  // same week. Dinner falls back to extras if the target day already has
-  // dinner (matches the existing `auto` slot behavior). Follows the meal
-  // to its new day so the user sees the result.
-  const moveMeal = (slot, targetIdx) => {
-    if (targetIdx === selected) { setModal(null); return; }
+  // Move a meal from the currently-selected day to any other day — same week
+  // or a different one (the move sheet has week navigation). Dinner falls
+  // back to extras if the target day already has dinner (matches the
+  // existing `auto` slot behavior). Follows the meal to its new day/week so
+  // the user sees the result.
+  const cloneDay = (d) => ({
+    ...d,
+    meals: {
+      ...d.meals,
+      b: Array.isArray(d.meals.b) ? [...d.meals.b] : (d.meals.b ? [d.meals.b] : []),
+      snacks: [...(d.meals.snacks || [])],
+    },
+    tasks: [...(d.tasks || [])],
+  });
+  const dropIntoDay = (draft, mealType, recipeName) => {
+    if (mealType === 'b') draft.meals.b.push(recipeName);
+    else if (mealType === 'd') {
+      if (!draft.meals.d) draft.meals.d = recipeName;
+      else draft.meals.snacks.push(recipeName);
+    } else if (mealType === 'snack') {
+      draft.meals.snacks.push(recipeName);
+    }
+  };
+  const removeFromDay = (draft, mealType, slot) => {
+    if (mealType === 'b') draft.meals.b.splice(slot.idx, 1);
+    else if (mealType === 'd') draft.meals.d = null;
+    else if (mealType === 'snack') draft.meals.snacks.splice(slot, 1);
+    if (!dayHasContent(draft)) draft.planned = false;
+  };
+
+  const moveMeal = (slot, targetOffset, targetIdx) => {
+    if (targetOffset === weekOffset && targetIdx === selected) { setModal(null); return; }
     const sourceDay = weekData[selected];
     if (!sourceDay) { setModal(null); return; }
     const srcB = Array.isArray(sourceDay.meals.b) ? sourceDay.meals.b : [];
@@ -3468,33 +3505,28 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
     }
     if (!recipeName) { setModal(null); return; }
 
-    const next = weekData.map((d, i) => {
-      const draft = {
-        ...d,
-        meals: {
-          ...d.meals,
-          b: Array.isArray(d.meals.b) ? [...d.meals.b] : (d.meals.b ? [d.meals.b] : []),
-          snacks: [...(d.meals.snacks || [])],
-        },
-        tasks: [...(d.tasks || [])],
-      };
-      if (i === selected) {
-        if (mealType === 'b') draft.meals.b.splice(slot.idx, 1);
-        else if (mealType === 'd') draft.meals.d = null;
-        else if (mealType === 'snack') draft.meals.snacks.splice(slot, 1);
-        if (!dayHasContent(draft)) draft.planned = false;
-      } else if (i === targetIdx) {
-        if (mealType === 'b') draft.meals.b.push(recipeName);
-        else if (mealType === 'd') {
-          if (!draft.meals.d) draft.meals.d = recipeName;
-          else draft.meals.snacks.push(recipeName);
-        } else if (mealType === 'snack') {
-          draft.meals.snacks.push(recipeName);
-        }
-      }
-      return draft;
-    });
-    setWeekData(next);
+    if (targetOffset === weekOffset) {
+      // Same week — single-week write via setWeekData (existing sync path).
+      const next = weekData.map((d, i) => {
+        const draft = cloneDay(d);
+        if (i === selected) removeFromDay(draft, mealType, slot);
+        else if (i === targetIdx) dropIntoDay(draft, mealType, recipeName);
+        return draft;
+      });
+      setWeekData(next);
+    } else if (setWeekMap) {
+      // Cross-week — update both weeks in one weekMap write. The target week
+      // is materialized through mergeWeek so a never-visited week gets a
+      // proper skeleton before the meal lands on it.
+      setWeekMap(prev => {
+        const srcWeek = weekData.map(cloneDay);
+        removeFromDay(srcWeek[selected], mealType, slot);
+        const tgtWeek = mergeWeek(buildWeek(targetOffset), prev[targetOffset]).map(cloneDay);
+        dropIntoDay(tgtWeek[targetIdx], mealType, recipeName);
+        return { ...prev, [weekOffset]: srcWeek, [targetOffset]: tgtWeek };
+      });
+      setWeekOffset(targetOffset);
+    }
     setSelected(targetIdx);
     setModal(null);
   };
@@ -3673,10 +3705,11 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, r
       )}
       {modal?.type === 'move' && (
         <MoveDaySheet
-          weekData={weekData}
+          weekMap={weekMap}
+          currentOffset={weekOffset}
           currentIdx={selected}
           mealName={modal.mealName}
-          onMove={(targetIdx) => moveMeal(modal.slot, targetIdx)}
+          onMove={(targetOffset, targetIdx) => moveMeal(modal.slot, targetOffset, targetIdx)}
           onClose={() => setModal(null)}
         />
       )}
@@ -6994,7 +7027,10 @@ function App() {
   const currentWeek = mergeWeek(buildWeek(weekOffset), weekMap[weekOffset]);
   const setCurrentWeek = (next) => setWeekMap({ ...weekMap, [weekOffset]: next });
   const handleWeekOffset = (next) => {
-    if (!weekMap[next]) setWeekMap(prev => ({ ...prev, [next]: buildWeek(next) }));
+    // Functional guard: checking the captured `weekMap` here instead would
+    // race with same-batch weekMap writes (e.g. a cross-week meal move that
+    // just materialized the target week) and clobber them with a blank week.
+    setWeekMap(prev => prev[next] ? prev : { ...prev, [next]: buildWeek(next) });
     setWeekOffset(next);
   };
 
@@ -7076,6 +7112,8 @@ function App() {
         setWeekData={setCurrentWeek}
         weekOffset={weekOffset}
         setWeekOffset={handleWeekOffset}
+        weekMap={weekMap}
+        setWeekMap={setWeekMap}
         recipeDB={recipeDB}
         onMealClick={(name) => {
           const r = recipeDB.find(x => x.name === name);
