@@ -3730,7 +3730,8 @@ function parseItem(text) {
   //   - decimal: "2.5"
   //   - integer: "2"
   //   - unicode fraction: ½ ⅓ ⅔ ¼ ¾ ⅛ ⅜ ⅝ ⅞ ⅕ ⅖ ⅗ ⅘ ⅙ ⅚
-  const NUM = '(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?|[½⅓⅔¼¾⅛⅜⅝⅞⅕⅖⅗⅘⅙⅚])';
+  // Mixed numbers accept space or hyphen ("1 1/2" and Taste-of-Home's "1-1/2").
+  const NUM = '(?:\\d+[\\s-]\\d+\\/\\d+|\\d+\\/\\d+|\\d+(?:\\.\\d+)?|[½⅓⅔¼¾⅛⅜⅝⅞⅕⅖⅗⅘⅙⅚])';
   // Unit tokens that count as part of the qty (optional). Plural variants
   // included so "2 cans" parses as one qty token, not "2" + name "cans".
   const UNIT = '\\s*(?:pounds?|lb|lbs|ounces?|oz|kg|grams?|g|cups?|tablespoons?|tbsp|teaspoons?|tsp|jars?|box(?:es)?|bags?|cans?|bottles?|bunch(?:es)?|heads?|cloves?|packages?|pkg|sticks?|slices?|pieces?|fillets?|liters?|litres?|ml|inch|in|pinch|dash)?';
@@ -3743,6 +3744,111 @@ function parseItem(text) {
   const m = t.match(re);
   if (m) return { q: m[1].trim(), n: m[2].trim() };
   return { q: '', n: t };
+}
+
+/* ── Quantity arithmetic ──
+   sumQtyStrings(["1 lb", "1 1/2 lbs"]) → "2 1/2 lbs". Used everywhere two
+   recipes contribute the same grocery item so portions ADD instead of being
+   listed side by side (or worse, deduped as identical strings — the old Set
+   join collapsed "1 lb" + "1 lb" into a single "1 lb").
+   Segments with incompatible or unparseable units stay joined with " + ". */
+const QTY_FRACTIONS = { '½':1/2, '⅓':1/3, '⅔':2/3, '¼':1/4, '¾':3/4, '⅛':1/8, '⅜':3/8, '⅝':5/8, '⅞':7/8, '⅕':1/5, '⅖':2/5, '⅗':3/5, '⅘':4/5, '⅙':1/6, '⅚':5/6 };
+// unit → [canonical, singular display, plural display]
+const QTY_UNIT_TABLE = (() => {
+  const table = {};
+  const add = (variants, one, many) => variants.forEach(v => { table[v] = { key: variants[0], one, many }; });
+  add(['lb','lbs','pound','pounds'], 'lb', 'lbs');
+  add(['oz','ounce','ounces'], 'oz', 'oz');
+  add(['cup','cups'], 'cup', 'cups');
+  add(['tbsp','tablespoon','tablespoons'], 'tbsp', 'tbsp');
+  add(['tsp','teaspoon','teaspoons'], 'tsp', 'tsp');
+  add(['g','gram','grams'], 'g', 'g');
+  add(['kg'], 'kg', 'kg');
+  add(['ml'], 'ml', 'ml');
+  add(['l','liter','liters','litre','litres'], 'L', 'L');
+  add(['can','cans'], 'can', 'cans');
+  add(['jar','jars'], 'jar', 'jars');
+  add(['bag','bags'], 'bag', 'bags');
+  add(['box','boxes'], 'box', 'boxes');
+  add(['bottle','bottles'], 'bottle', 'bottles');
+  add(['bunch','bunches'], 'bunch', 'bunches');
+  add(['head','heads'], 'head', 'heads');
+  add(['clove','cloves'], 'clove', 'cloves');
+  add(['pkg','package','packages'], 'pkg', 'pkg');
+  add(['stick','sticks'], 'stick', 'sticks');
+  add(['slice','slices'], 'slice', 'slices');
+  add(['piece','pieces'], 'piece', 'pieces');
+  add(['fillet','fillets'], 'fillet', 'fillets');
+  add(['pinch','pinches'], 'pinch', 'pinches');
+  add(['dash','dashes'], 'dash', 'dashes');
+  return table;
+})();
+
+function parseQtySegment(seg) {
+  const s = String(seg || '').trim();
+  const m = s.match(/^(\d+[\s-]\d+\/\d+|\d+\/\d+|\d+(?:\.\d+)?|[½⅓⅔¼¾⅛⅜⅝⅞⅕⅖⅗⅘⅙⅚])\s*(.*)$/);
+  if (!m) return null;
+  let num;
+  const numStr = m[1];
+  if (QTY_FRACTIONS[numStr] != null) num = QTY_FRACTIONS[numStr];
+  else if (/^\d+[\s-]\d+\/\d+$/.test(numStr)) {
+    const [whole, frac] = numStr.split(/[\s-]+/);
+    const [a, b] = frac.split('/').map(Number);
+    num = Number(whole) + (b ? a / b : 0);
+  } else if (/^\d+\/\d+$/.test(numStr)) {
+    const [a, b] = numStr.split('/').map(Number);
+    num = b ? a / b : NaN;
+  } else num = Number(numStr);
+  if (!isFinite(num)) return null;
+  const rest = m[2].trim();
+  const unitInfo = QTY_UNIT_TABLE[rest.toLowerCase()];
+  // Unknown "units" ("small", "(14 ounce) can") still group — by their exact
+  // lowercased text — so "1 small" + "1 small" makes "2 small".
+  return { num, key: unitInfo ? unitInfo.key : rest.toLowerCase(), unitInfo, rawUnit: rest };
+}
+
+function formatQtyNum(x) {
+  const whole = Math.floor(x + 1e-9);
+  const frac = x - whole;
+  const NICE = [[1/8,'1/8'],[1/4,'1/4'],[1/3,'1/3'],[3/8,'3/8'],[1/2,'1/2'],[5/8,'5/8'],[2/3,'2/3'],[3/4,'3/4'],[7/8,'7/8']];
+  for (const [v, s] of NICE) {
+    if (Math.abs(frac - v) < 0.02) return whole ? `${whole} ${s}` : s;
+  }
+  if (frac < 0.02) return String(whole);
+  return String(Math.round(x * 100) / 100);
+}
+
+function sumQtyStrings(parts) {
+  const segs = (parts || [])
+    .flatMap(p => String(p || '').split(' + '))
+    .map(s => s.trim())
+    .filter(Boolean);
+  const groups = new Map(); // key → { total, unitInfo, rawUnit }
+  const unparsed = [];      // verbatim segments we can't do math on
+  segs.forEach(seg => {
+    const p = parseQtySegment(seg);
+    if (!p) { if (!unparsed.includes(seg)) unparsed.push(seg); return; }
+    const g = groups.get(p.key);
+    if (g) g.total += p.num;
+    else groups.set(p.key, { total: p.num, unitInfo: p.unitInfo, rawUnit: p.rawUnit });
+  });
+  const out = [];
+  groups.forEach(({ total, unitInfo, rawUnit }) => {
+    const numStr = formatQtyNum(total);
+    if (!rawUnit) { out.push(numStr); return; }
+    if (unitInfo) {
+      out.push(`${numStr} ${total > 1 ? unitInfo.many : unitInfo.one}`);
+      return;
+    }
+    // Unknown unit text: keep verbatim, but pluralize a known trailing unit
+    // word ("(14 ounce) can" → "(14 ounce) cans") when the total grew.
+    let unitStr = rawUnit;
+    const words = rawUnit.split(/\s+/);
+    const last = QTY_UNIT_TABLE[words[words.length - 1].toLowerCase()];
+    if (last && total > 1) unitStr = [...words.slice(0, -1), last.many].join(' ');
+    out.push(`${numStr} ${unitStr}`);
+  });
+  return [...out, ...unparsed].join(' + ');
 }
 
 /* Order matters: more specific categories (multi-word keywords) come first
@@ -4536,13 +4642,13 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
     setItems(prev => {
       const idx = prev.findIndex(i => normName(i.n) === key);
       if (idx >= 0) {
-        // Item already on the list (often a hidden crossed-off copy the
-        // user can't see with showDone off). Reactivate it in place
-        // instead of creating a duplicate row.
+        // Item already on the list. Crossed-off copy → reactivate with the
+        // fresh qty (new shopping trip). Still-active copy → the user wants
+        // MORE of it, so add the portions together ("1 lb" again → "2 lbs").
         return prev.map((i, j) => j === idx ? {
           ...i,
           done: false,
-          q: q || i.q,
+          q: i.done ? (q || i.q) : sumQtyStrings([i.q, q]),
           src: /manual/i.test(i.src || '') ? i.src : [i.src, 'Added manually'].filter(Boolean).join(' + '),
         } : i);
       }
@@ -5599,11 +5705,12 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
         const idx = next.findIndex(it => (it.n || '').toLowerCase() === key);
         if (idx >= 0) {
           const it = next[idx];
-          const qSet = new Set((it.q || '').split(' + ').map(s => s.trim()).filter(Boolean));
-          if (parsed.q) qSet.add(parsed.q);
           const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
+          // Add this recipe's portion on top of what's there — unless this
+          // recipe already contributed (same src), which must not double it.
+          const q = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, parsed.q]);
           sSet.add(recipeName);
-          next[idx] = { ...it, q: [...qSet].join(' + '), src: [...sSet].join(' + '), done: false };
+          next[idx] = { ...it, q, src: [...sSet].join(' + '), done: false };
         } else {
           next.push({ q: parsed.q || '', n: itemName, done: false, src: recipeName });
         }
@@ -5615,26 +5722,51 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   };
 
   // One-tap "everything for this recipe onto the grocery list". Skips pantry
-  // staples (salt, olive oil, …) the same way the auto-planner does, and
-  // skips items already on the list, so tapping twice can't double up.
+  // staples (salt, olive oil, …) the same way the auto-planner does. Items
+  // already on the list from OTHER recipes get this recipe's portion ADDED
+  // on top ("1 lb" + "1 lb" → "2 lbs"); items this recipe already
+  // contributed are skipped, so tapping twice can't double up.
   const addAllToGrocery = () => {
     if (!setGroceryList) return;
     const isPantry = makeIsPantry(pantryStaples);
+    const listByName = new Map(groceryList.map(it => [((it.n || '')).trim().toLowerCase(), it]));
     let added = 0, skippedPantry = 0, alreadyOn = 0;
+    const additions = []; // { name, q }
     ingredients.forEach((ing, i) => {
       if (!ing) return;
-      // Derive the SAME list key toggleIng will use (qty stripped from the
-      // raw line) — checking the bare ingredient name against the list would
-      // miss items stored under their parsed name, and re-tapping would then
-      // toggle them OFF instead of skipping.
+      // Derive the list key from the parsed raw line (qty stripped) — the
+      // bare ingredient name can differ from the stored item name.
       const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
-      const parsed = raw ? parseItem(raw) : { n: ing };
-      const key = ((parsed.n || ing) || '').trim().toLowerCase();
-      if (groceryNames.has(key)) { alreadyOn++; return; }
+      const parsed = raw ? parseItem(raw) : { q: '', n: ing };
+      const name = ((parsed.n || ing) || '').trim();
+      if (!name) return;
+      const existing = listByName.get(name.toLowerCase());
+      if (existing) {
+        const srcs = (existing.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
+        if (srcs.includes(recipeName)) { alreadyOn++; return; } // our portion already counted
+      }
       if (isPantry(ing)) { skippedPantry++; return; }
-      toggleIng(i);
+      additions.push({ name, q: parsed.q || '' });
       added++;
     });
+    if (additions.length) {
+      setGroceryList(prev => {
+        const next = [...prev];
+        additions.forEach(({ name, q }) => {
+          const idx = next.findIndex(it => (it.n || '').trim().toLowerCase() === name.toLowerCase());
+          if (idx >= 0) {
+            const it = next[idx];
+            const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
+            const nq = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, q]);
+            sSet.add(recipeName);
+            next[idx] = { ...it, q: nq, src: [...sSet].join(' + '), done: false };
+          } else {
+            next.push({ q, n: name, done: false, src: recipeName });
+          }
+        });
+        return next;
+      });
+    }
     const parts = [];
     if (added) parts.push(`Added ${added} to grocery list`);
     if (skippedPantry) parts.push(`${skippedPantry} pantry skipped`);
@@ -6301,13 +6433,18 @@ function AutoPlanScreen({
       ings.forEach((ing, i) => {
         if (!ing || isPantry(ing)) return;
         const key = ing.toLowerCase();
-        if (!aggregated[key]) aggregated[key] = { name: ing, qSet: new Set(), srcs: new Set() };
+        if (!aggregated[key]) aggregated[key] = { name: ing, contribs: [], srcs: new Set() };
         const raw = qtys[i];
+        const srcLabel = `${dt} · ${recipe.name}`;
         if (raw) {
           const parsed = parseItem(raw);
-          if (parsed.q) aggregated[key].qSet.add(parsed.q);
+          // Keep every contribution (with its source) instead of a Set of
+          // strings — two recipes each needing "1 lb" must total 2 lbs, and
+          // the src tag lets the list-merge below skip contributions whose
+          // source is already counted on the persisted item.
+          if (parsed.q) aggregated[key].contribs.push({ q: parsed.q, src: srcLabel });
         }
-        aggregated[key].srcs.add(`${dt} · ${recipe.name}`);
+        aggregated[key].srcs.add(srcLabel);
       });
     });
     if (missingIngredients.length) {
@@ -6405,24 +6542,25 @@ function AutoPlanScreen({
     const indexByName = {};
     nextList.forEach((it, i) => { indexByName[it.n.toLowerCase()] = i; });
     let added = 0, merged = 0;
-    Object.values(aggregated).forEach(({ name, qSet, srcs }) => {
+    Object.values(aggregated).forEach(({ name, contribs, srcs }) => {
       const key = name.toLowerCase();
       const srcStr = [...srcs].join(' + ');
-      const qStr = [...qSet].join(' + ');
       if (indexByName[key] != null) {
         const i = indexByName[key];
-        const existingSrcs = (nextList[i].src || '').split(' + ').filter(Boolean);
+        const existingSrcs = (nextList[i].src || '').split(' + ').map(s => s.trim()).filter(Boolean);
+        const existingSrcSet = new Set(existingSrcs);
         const mergedSrcs = new Set([...existingSrcs, ...srcs]);
-        const existingQs = (nextList[i].q || '').split(' + ').filter(Boolean);
-        const mergedQs = new Set([...existingQs, ...qSet]);
+        // Only ADD quantities from sources not already counted on this item —
+        // re-applying a plan in append mode must not double the ground beef.
+        const newContribs = contribs.filter(c => !existingSrcSet.has(c.src));
         nextList[i] = {
           ...nextList[i],
           src: [...mergedSrcs].join(' + '),
-          q: [...mergedQs].join(' + '),
+          q: sumQtyStrings([nextList[i].q, ...newContribs.map(c => c.q)]),
         };
         merged++;
       } else {
-        nextList.push({ q: qStr, n: name, done: false, src: srcStr });
+        nextList.push({ q: sumQtyStrings(contribs.map(c => c.q)), n: name, done: false, src: srcStr });
         added++;
       }
     });
