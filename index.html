@@ -3921,6 +3921,20 @@ function groceryKey(name) {
   return key || original;
 }
 
+/* Every canonical key a list entry answers to. `akas` holds keys absorbed
+   when the user renames an item — rename "spinach or kale" to "kale" and the
+   row keeps answering to the recipe's original wording, so the next auto-plan
+   merges into the renamed row instead of re-adding the recipe's version. */
+function itemKeys(it) {
+  const keys = [groceryKey(it && it.n)];
+  ((it && it.akas) || []).forEach(k => { if (k && !keys.includes(k)) keys.push(k); });
+  return keys.filter(Boolean);
+}
+function findItemIndex(list, key) {
+  if (!key) return -1;
+  return (list || []).findIndex(it => itemKeys(it).includes(key));
+}
+
 // Which name to DISPLAY once two entries merge. Prefers the plainer name
 // ("lemon" over "lemon wedge"), then matches plurality to the new total
 // (3 → "carrots", 1 → "carrot").
@@ -4626,12 +4640,92 @@ function ShopSheet({ items, toggle, listText, onClose }) {
   );
 }
 
+/* ── Edit one grocery item (name + quantity) ──
+   Recipes often name an ingredient in a way you'd never write on a list
+   ("spinach or kale", "1 (14 ounce) can diced tomatoes"). This lets the list
+   say what you'll actually buy. */
+function EditItemSheet({ item, onSave, onDelete, onClose }) {
+  const [name, setName] = useState(item.n || '');
+  const [qty, setQty] = useState(item.q || '');
+  const dirty = name.trim() !== (item.n || '') || qty.trim() !== (item.q || '');
+  const save = () => {
+    const n = name.trim();
+    if (!n) return;              // an item with no name can't be shopped for
+    onSave({ n, q: qty.trim() });
+  };
+  const field = {
+    width:'100%', boxSizing:'border-box', height:48, background:'#0f0f18',
+    border:'1.5px solid var(--border)', borderRadius:10, padding:'0 12px',
+    color:'var(--text)', fontFamily:'var(--font)', fontSize:17, outline:'none',
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()}>
+        <div className="modal-grabber" />
+        <div className="modal-header">
+          <div className="modal-title">Edit item</div>
+          <span className="modal-close" onClick={onClose}>×</span>
+        </div>
+
+        <div style={{ display:'flex', gap:8, marginBottom:10 }}>
+          <div style={{ width:'34%' }}>
+            <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:4 }}>Amount</div>
+            <input
+              value={qty}
+              onChange={e => setQty(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') save(); }}
+              placeholder="2 lbs"
+              style={field}
+            />
+          </div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:4 }}>Item</div>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') save(); }}
+              placeholder="kale"
+              autoFocus
+              style={field}
+            />
+          </div>
+        </div>
+
+        {item.src && (
+          <div style={{ fontSize:12, color:'var(--text-dimmer)', marginBottom:12 }}>
+            From: {item.src}
+          </div>
+        )}
+        {dirty && (
+          <div style={{ fontSize:12, color:'var(--purple-light)', marginBottom:10 }}>
+            Your wording sticks — future meal plans add to this item instead of re-adding the recipe's version.
+          </div>
+        )}
+
+        <div style={{ display:'flex', gap:8, padding:'2px 0 4px' }}>
+          <div
+            className="gen-btn"
+            onClick={onDelete}
+            style={{ flex:1, background:'#202030', color:'#e06c6c', border:'1.5px solid var(--border)' }}
+          >Delete</div>
+          <div
+            className="gen-btn"
+            onClick={save}
+            style={{ flex:2, opacity: name.trim() ? 1 : 0.5 }}
+          >Save</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples, apiKey, catCache, setCatCache }) {
   const [showDone, setShowDone] = useState(false);
   const [newItemText, setNewItemText] = useState('');
   const [showPantry, setShowPantry] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [showShop, setShowShop] = useState(false);
+  const [editKey, setEditKey] = useState(null); // canonical key of item being edited
 
   // LLM is the source of truth for category AND for the "should this even be on
   // the grocery list?" decision (isStaple). The cache (catCache) holds Claude's
@@ -4719,7 +4813,13 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       tgt.q = sumQtyStrings([tgt.q, it.q]);
       const ss = new Set([...(tgt.src || '').split(' + '), ...(it.src || '').split(' + ')].map(s => s.trim()).filter(Boolean));
       tgt.src = [...ss].join(' + ');
-      tgt.n = preferredItemName(tgt.n, it.n, tgt.q);
+      // A row the user edited keeps its wording; otherwise pick the better form.
+      if (it.edited && !tgt.edited) tgt.n = it.n;
+      else if (!tgt.edited) tgt.n = preferredItemName(tgt.n, it.n, tgt.q);
+      tgt.edited = tgt.edited || it.edited;
+      const mergedAkas = [...new Set([...(tgt.akas || []), ...(it.akas || [])])]
+        .filter(k => k && k !== groceryKey(tgt.n));
+      tgt.akas = mergedAkas.length ? mergedAkas : undefined;
       tgt.done = tgt.done && it.done;
     });
     if (dupes) setItems(Object.values(byKey));
@@ -4736,7 +4836,8 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
     const { q, n } = parseItem(t);
     const key = normName(n);
     setItems(prev => {
-      const idx = prev.findIndex(i => normName(i.n) === key);
+      // Alias-aware: typing "spinach" lands on the row you renamed to "kale".
+      const idx = findItemIndex(prev, key);
       if (idx >= 0) {
         // Item already on the list. Crossed-off copy → reactivate with the
         // fresh qty (new shopping trip). Still-active copy → the user wants
@@ -4748,7 +4849,7 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
             ...i,
             done: false,
             q: nq,
-            n: preferredItemName(i.n, n, nq),
+            n: i.edited ? i.n : preferredItemName(i.n, n, nq),
             src: /manual/i.test(i.src || '') ? i.src : [i.src, 'Added manually'].filter(Boolean).join(' + '),
           };
         });
@@ -4756,6 +4857,50 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       return [{ q, n, done:false, src:'Added manually' }, ...prev];
     });
     setNewItemText('');
+  };
+
+  const editing = editKey ? items.find(i => itemKeys(i).includes(editKey)) : null;
+
+  // Save a user edit. Renaming records the OLD canonical key as an alias so
+  // the recipe wording this row came from keeps landing here — otherwise the
+  // next auto-plan would re-add "spinach or kale" beside the user's "kale".
+  // If the new name collides with another row, the two are merged.
+  const saveEdit = ({ n, q }) => {
+    setItems(prev => {
+      const idx = findItemIndex(prev, editKey);
+      if (idx < 0) return prev;
+      const old = prev[idx];
+      const oldKeys = itemKeys(old);
+      const newKey = groceryKey(n);
+      const akas = oldKeys.filter(k => k && k !== newKey);
+      const updated = { ...old, n, q, edited: true, akas: akas.length ? akas : undefined };
+
+      // Renamed onto an existing row → fold them together.
+      const collideIdx = prev.findIndex((it, j) => j !== idx && itemKeys(it).includes(newKey));
+      if (collideIdx >= 0) {
+        const other = prev[collideIdx];
+        const mergedQ = sumQtyStrings([other.q, q]);
+        const mergedSrc = [...new Set([
+          ...(other.src || '').split(' + '),
+          ...(old.src || '').split(' + '),
+        ].map(s => s.trim()).filter(Boolean))].join(' + ');
+        const mergedAkas = [...new Set([...(other.akas || []), ...akas])].filter(k => k !== newKey);
+        const merged = {
+          ...other, n, q: mergedQ, src: mergedSrc, edited: true,
+          akas: mergedAkas.length ? mergedAkas : undefined,
+          done: other.done && old.done,
+        };
+        return prev.filter((_, j) => j !== idx).map((it, j) =>
+          j === (collideIdx > idx ? collideIdx - 1 : collideIdx) ? merged : it);
+      }
+      return prev.map((it, j) => j === idx ? updated : it);
+    });
+    setEditKey(null);
+  };
+
+  const deleteEdited = () => {
+    setItems(prev => prev.filter(i => !itemKeys(i).includes(editKey)));
+    setEditKey(null);
   };
 
   const visible = showDone ? items : items.filter(i => !i.done);
@@ -4856,10 +5001,19 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
               {catItems.map(({ q, n, done, src }) => (
                 <div key={normName(n)} className={`check-row${done ? ' crossed' : ''}`} style={{ paddingTop:10, paddingBottom:10 }}>
                   <div className={`check-box${done ? ' done' : ''}`} onClick={() => toggle(n)} style={{ cursor:'pointer' }} />
-                  <div style={{ flex:1 }}>
+                  <div style={{ flex:1, minWidth:0 }}>
                     <div>{q && <span className="qty">{q}</span>} {n}</div>
                     <div style={{ fontSize:12, color:'#444', marginTop:2 }}>{src}</div>
                   </div>
+                  <span
+                    onClick={() => setEditKey(groceryKey(n))}
+                    title="Edit amount or wording"
+                    style={{
+                      padding:'8px 6px 8px 12px', margin:'-8px -4px -8px 0',
+                      fontSize:15, color:'var(--text-dimmer)', cursor:'pointer',
+                      flexShrink:0, lineHeight:1,
+                    }}
+                  >✎</span>
                 </div>
               ))}
             </div>
@@ -4898,6 +5052,15 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
           toggle={toggle}
           listText={listAsText()}
           onClose={() => setShowShop(false)}
+        />
+      )}
+
+      {editing && (
+        <EditItemSheet
+          item={editing}
+          onSave={saveEdit}
+          onDelete={deleteEdited}
+          onClose={() => setEditKey(null)}
         />
       )}
 
@@ -5763,7 +5926,9 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   // back to the recipe view).
   const groceryByName = (() => {
     const m = {};
-    (groceryList || []).forEach(it => { if (it && it.n) m[groceryKey(it.n)] = it; });
+    // Index every key an item answers to, so a recipe ingredient still reads
+    // as "on the list" after the user renamed the row it landed on.
+    (groceryList || []).forEach(it => { if (it && it.n) itemKeys(it).forEach(k => { m[k] = it; }); });
     return m;
   })();
   const groceryNames = new Set(Object.keys(groceryByName));
@@ -5785,7 +5950,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     if (onList) {
       setGroceryList(prev => {
         const next = [...prev];
-        const idx = next.findIndex(it => groceryKey(it.n) === key);
+        const idx = findItemIndex(next, key);
         if (idx < 0) return prev;
         const it = next[idx];
         const segs = (it.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
@@ -5803,7 +5968,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     } else {
       setGroceryList(prev => {
         const next = [...prev];
-        const idx = next.findIndex(it => groceryKey(it.n) === key);
+        const idx = findItemIndex(next, key);
         if (idx >= 0) {
           const it = next[idx];
           const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
@@ -5811,7 +5976,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
           // recipe already contributed (same src), which must not double it.
           const q = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, parsed.q]);
           sSet.add(recipeName);
-          next[idx] = { ...it, q, n: preferredItemName(it.n, itemName, q), src: [...sSet].join(' + '), done: false };
+          next[idx] = { ...it, q, n: it.edited ? it.n : preferredItemName(it.n, itemName, q), src: [...sSet].join(' + '), done: false };
         } else {
           next.push({ q: parsed.q || '', n: itemName, done: false, src: recipeName });
         }
@@ -5830,7 +5995,8 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const addAllToGrocery = () => {
     if (!setGroceryList) return;
     const isPantry = makeIsPantry(pantryStaples);
-    const listByName = new Map(groceryList.map(it => [groceryKey(it.n), it]));
+    const listByName = new Map();
+    groceryList.forEach(it => itemKeys(it).forEach(k => { if (!listByName.has(k)) listByName.set(k, it); }));
     let added = 0, skippedPantry = 0, alreadyOn = 0;
     const additions = []; // { name, q }
     ingredients.forEach((ing, i) => {
@@ -5854,13 +6020,13 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
       setGroceryList(prev => {
         const next = [...prev];
         additions.forEach(({ name, q }) => {
-          const idx = next.findIndex(it => groceryKey(it.n) === groceryKey(name));
+          const idx = findItemIndex(next, groceryKey(name));
           if (idx >= 0) {
             const it = next[idx];
             const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
             const nq = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, q]);
             sSet.add(recipeName);
-            next[idx] = { ...it, q: nq, n: preferredItemName(it.n, name, nq), src: [...sSet].join(' + '), done: false };
+            next[idx] = { ...it, q: nq, n: it.edited ? it.n : preferredItemName(it.n, name, nq), src: [...sSet].join(' + '), done: false };
           } else {
             next.push({ q, n: name, done: false, src: recipeName });
           }
@@ -6589,6 +6755,7 @@ function AutoPlanScreen({
       };
       nextList = groceryList
         .map(it => {
+          if (it.edited) return it; // user's own wording survives a day overwrite
           const srcs = (it.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
           const keptSrcs = srcs.filter(s => !matchesOverwriteDt(s));
           if (keptSrcs.length === srcs.length) return it; // nothing stripped
@@ -6634,6 +6801,9 @@ function AutoPlanScreen({
     };
     nextList = nextList
       .map(it => {
+        // A row the user edited by hand is their own note, not auto-plan
+        // residue — never drop it or blank its amount, same as manual adds.
+        if (it.edited) return it;
         const srcs = (it.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
         if (!srcs.length) return it; // no parseable sources to begin with → leave alone
         const keptSrcs = srcs.filter(s => !isStaleSrcSegment(s));
@@ -6645,7 +6815,7 @@ function AutoPlanScreen({
       })
       .filter(it => it !== null);
     const indexByName = {};
-    nextList.forEach((it, i) => { indexByName[groceryKey(it.n)] = i; });
+    nextList.forEach((it, i) => { itemKeys(it).forEach(k => { indexByName[k] = i; }); });
     let added = 0, merged = 0;
     Object.values(aggregated).forEach(({ name, contribs, srcs }) => {
       const key = groceryKey(name);
@@ -6663,7 +6833,7 @@ function AutoPlanScreen({
           ...nextList[i],
           src: [...mergedSrcs].join(' + '),
           q: nq,
-          n: preferredItemName(nextList[i].n, name, nq),
+          n: nextList[i].edited ? nextList[i].n : preferredItemName(nextList[i].n, name, nq),
         };
         merged++;
       } else {
@@ -6691,6 +6861,7 @@ function AutoPlanScreen({
       const before = nextList.length;
       nextList = nextList.filter(it => {
         if (/manual/i.test(it.src || '')) return true;
+        if (it.edited) return true; // the user put this wording here on purpose
         const name = it.n || '';
         const lo = name.toLowerCase();
         // Fresh produce / specialty items are never staples — keep even if a
