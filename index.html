@@ -3851,6 +3851,99 @@ function sumQtyStrings(parts) {
   return [...out, ...unparsed].join(' + ');
 }
 
+/* ── Canonical grocery identity ──
+   Two grocery entries are the SAME item when their groceryKey() matches, so
+   "2 carrots" merges into "1 carrot" (→ 3 carrots) and "lemon wedge" into
+   "lemon" instead of sitting on the list as near-duplicate rows.
+
+   Deliberately conservative: it only removes words describing how something
+   is CUT or PREPPED, never words that change what you actually buy. So
+   "dried oregano" never merges into "fresh oregano", "ground beef" stays
+   distinct from "beef", and "sweet potato" from "potato". When in doubt the
+   word is left alone — a missed merge is a cosmetic annoyance, a wrong merge
+   silently buys the wrong thing. */
+
+// Words ending in "s" that are already singular (or mass nouns) — never trim.
+const NEVER_SINGULAR = new Set([
+  'asparagus','hummus','molasses','couscous','watercress','swiss','bass',
+  'grass','glass','greens','oats','brussels','sprouts','chives','anise',
+  'grits','cress','miso','harissa','hoisin','ras','moss','sauces',
+]);
+const IRREGULAR_PLURAL = {
+  leaves:'leaf', halves:'half', loaves:'loaf', knives:'knife', shelves:'shelf',
+  potatoes:'potato', tomatoes:'tomato', mangoes:'mango', avocadoes:'avocado',
+  children:'child', geese:'goose', teeth:'tooth', feet:'foot',
+};
+function singularizeWord(w) {
+  const s = String(w || '').toLowerCase();
+  if (IRREGULAR_PLURAL[s]) return IRREGULAR_PLURAL[s];
+  if (s.length < 4 || NEVER_SINGULAR.has(s) || !s.endsWith('s') || s.endsWith('ss')) return s;
+  if (s.endsWith('ies')) return s.slice(0, -3) + 'y';           // berries → berry
+  if (/(?:ch|sh|x|z|s)es$/.test(s)) return s.slice(0, -2);      // peaches → peach, boxes → box
+  if (s.endsWith('oes')) return s.slice(0, -2);                 // (non-irregular) → drop "es"
+  return s.slice(0, -1);                                        // carrots → carrot
+}
+// Prep-state adjectives stripped from the FRONT. Each describes knife work or
+// freshness, not a different product on the shelf.
+const PREP_WORDS = new Set([
+  'fresh','freshly','chopped','diced','minced','sliced','shredded','grated',
+  'crushed','peeled','halved','quartered','cubed','julienned','thinly','thin',
+  'finely','coarsely','roughly','whole','ripe','trimmed','rinsed','drained',
+  'large','small','medium','jumbo','cut','torn','pitted','seeded','stemmed',
+]);
+// Serving/cut forms stripped from the END — "lemon wedge" is still a lemon.
+const CUT_FORMS = new Set([
+  'wedge','slice','half','piece','chunk','strip','floret','spear','sprig',
+  'leaf','clove','stalk','stick','round','ribbon','segment','fillet',
+]);
+function groceryKey(name) {
+  const original = String(name || '').trim().toLowerCase();
+  if (!original) return '';
+  let s = original
+    .split(',')[0]                 // "carrots, chopped" → "carrots"
+    .replace(/\([^)]*\)/g, ' ')    // drop "(about 2 cups)"
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  let words = s.split(' ').filter(Boolean);
+  while (words.length > 1 && PREP_WORDS.has(words[0])) words.shift();
+  // Trailing cut form: drop it, but never reduce the name to nothing
+  // ("cloves" on its own is the spice, not a serving form of garlic).
+  if (words.length > 1) {
+    const lastSing = singularizeWord(words[words.length - 1]);
+    if (CUT_FORMS.has(lastSing)) {
+      words.pop();
+      if (words[words.length - 1] === 'of') words.pop();  // "wedge of lemon"
+    }
+  }
+  if (words.length) words[words.length - 1] = singularizeWord(words[words.length - 1]);
+  const key = words.join(' ').trim();
+  return key || original;
+}
+
+// Which name to DISPLAY once two entries merge. Prefers the plainer name
+// ("lemon" over "lemon wedge"), then matches plurality to the new total
+// (3 → "carrots", 1 → "carrot").
+function preferredItemName(existing, incoming, totalQty) {
+  const A = String(existing || '').trim(), B = String(incoming || '').trim();
+  if (!A) return B;
+  if (!B) return A;
+  const wc = (s) => s.split(/\s+/).filter(Boolean).length;
+  if (wc(A) !== wc(B)) return wc(A) < wc(B) ? A : B;
+  const isPlural = (s) => {
+    const w = s.split(/\s+/).filter(Boolean);
+    if (!w.length) return false;
+    const last = w[w.length - 1].toLowerCase();
+    return singularizeWord(last) !== last;
+  };
+  const aPl = isPlural(A), bPl = isPlural(B);
+  if (aPl === bPl) return A;
+  const first = String(totalQty || '').split(' + ')[0];
+  const parsed = parseQtySegment(first);
+  const wantPlural = parsed ? parsed.num > 1 : false;
+  return wantPlural ? (aPl ? A : B) : (aPl ? B : A);
+}
+
 /* Order matters: more specific categories (multi-word keywords) come first
    so things like "chicken broth" → Pantry (via "broth"), not Meat (via "chicken") */
 const CAT_RULES = [
@@ -4601,9 +4694,10 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       .catch(() => {});
   }, [items, apiKey]);
 
-  // Case/whitespace-insensitive identity for grocery items. "Garlic",
-  // "garlic" and "garlic " are the same item.
-  const normName = (s) => (s || '').trim().toLowerCase();
+  // Canonical identity for grocery items — see groceryKey(). Beyond case and
+  // whitespace this also folds singular/plural and prep wording, so "carrot"
+  // and "2 carrots" are one row whose portions add up.
+  const normName = groceryKey;
 
   // Maintenance: merge duplicate-name entries. Dupes happen when an item
   // is re-added manually while an old crossed-off copy sits hidden
@@ -4620,10 +4714,12 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       if (!byKey[k]) { byKey[k] = { ...it }; return; }
       dupes = true;
       const tgt = byKey[k];
-      const qs = new Set([...(tgt.q || '').split(' + '), ...(it.q || '').split(' + ')].map(s => s.trim()).filter(Boolean));
-      tgt.q = [...qs].join(' + ');
+      // Sum the portions rather than listing them side by side — this is the
+      // path that heals rows split by wording ("1 carrot" + "2 carrots").
+      tgt.q = sumQtyStrings([tgt.q, it.q]);
       const ss = new Set([...(tgt.src || '').split(' + '), ...(it.src || '').split(' + ')].map(s => s.trim()).filter(Boolean));
       tgt.src = [...ss].join(' + ');
+      tgt.n = preferredItemName(tgt.n, it.n, tgt.q);
       tgt.done = tgt.done && it.done;
     });
     if (dupes) setItems(Object.values(byKey));
@@ -4645,12 +4741,17 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
         // Item already on the list. Crossed-off copy → reactivate with the
         // fresh qty (new shopping trip). Still-active copy → the user wants
         // MORE of it, so add the portions together ("1 lb" again → "2 lbs").
-        return prev.map((i, j) => j === idx ? {
-          ...i,
-          done: false,
-          q: i.done ? (q || i.q) : sumQtyStrings([i.q, q]),
-          src: /manual/i.test(i.src || '') ? i.src : [i.src, 'Added manually'].filter(Boolean).join(' + '),
-        } : i);
+        return prev.map((i, j) => {
+          if (j !== idx) return i;
+          const nq = i.done ? (q || i.q) : sumQtyStrings([i.q, q]);
+          return {
+            ...i,
+            done: false,
+            q: nq,
+            n: preferredItemName(i.n, n, nq),
+            src: /manual/i.test(i.src || '') ? i.src : [i.src, 'Added manually'].filter(Boolean).join(' + '),
+          };
+        });
       }
       return [{ q, n, done:false, src:'Added manually' }, ...prev];
     });
@@ -5662,7 +5763,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   // back to the recipe view).
   const groceryByName = (() => {
     const m = {};
-    (groceryList || []).forEach(it => { if (it && it.n) m[it.n.toLowerCase()] = it; });
+    (groceryList || []).forEach(it => { if (it && it.n) m[groceryKey(it.n)] = it; });
     return m;
   })();
   const groceryNames = new Set(Object.keys(groceryByName));
@@ -5678,13 +5779,13 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     const parsed = raw ? parseItem(raw) : { q: '', n: ingredients[i] };
     const itemName = (parsed.n || ingredients[i] || '').trim();
     if (!itemName) return;
-    const key = itemName.toLowerCase();
+    const key = groceryKey(itemName);
     const onList = groceryNames.has(key);
 
     if (onList) {
       setGroceryList(prev => {
         const next = [...prev];
-        const idx = next.findIndex(it => (it.n || '').toLowerCase() === key);
+        const idx = next.findIndex(it => groceryKey(it.n) === key);
         if (idx < 0) return prev;
         const it = next[idx];
         const segs = (it.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
@@ -5702,7 +5803,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     } else {
       setGroceryList(prev => {
         const next = [...prev];
-        const idx = next.findIndex(it => (it.n || '').toLowerCase() === key);
+        const idx = next.findIndex(it => groceryKey(it.n) === key);
         if (idx >= 0) {
           const it = next[idx];
           const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
@@ -5710,7 +5811,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
           // recipe already contributed (same src), which must not double it.
           const q = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, parsed.q]);
           sSet.add(recipeName);
-          next[idx] = { ...it, q, src: [...sSet].join(' + '), done: false };
+          next[idx] = { ...it, q, n: preferredItemName(it.n, itemName, q), src: [...sSet].join(' + '), done: false };
         } else {
           next.push({ q: parsed.q || '', n: itemName, done: false, src: recipeName });
         }
@@ -5729,7 +5830,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const addAllToGrocery = () => {
     if (!setGroceryList) return;
     const isPantry = makeIsPantry(pantryStaples);
-    const listByName = new Map(groceryList.map(it => [((it.n || '')).trim().toLowerCase(), it]));
+    const listByName = new Map(groceryList.map(it => [groceryKey(it.n), it]));
     let added = 0, skippedPantry = 0, alreadyOn = 0;
     const additions = []; // { name, q }
     ingredients.forEach((ing, i) => {
@@ -5740,7 +5841,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
       const parsed = raw ? parseItem(raw) : { q: '', n: ing };
       const name = ((parsed.n || ing) || '').trim();
       if (!name) return;
-      const existing = listByName.get(name.toLowerCase());
+      const existing = listByName.get(groceryKey(name));
       if (existing) {
         const srcs = (existing.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
         if (srcs.includes(recipeName)) { alreadyOn++; return; } // our portion already counted
@@ -5753,13 +5854,13 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
       setGroceryList(prev => {
         const next = [...prev];
         additions.forEach(({ name, q }) => {
-          const idx = next.findIndex(it => (it.n || '').trim().toLowerCase() === name.toLowerCase());
+          const idx = next.findIndex(it => groceryKey(it.n) === groceryKey(name));
           if (idx >= 0) {
             const it = next[idx];
             const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
             const nq = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, q]);
             sSet.add(recipeName);
-            next[idx] = { ...it, q: nq, src: [...sSet].join(' + '), done: false };
+            next[idx] = { ...it, q: nq, n: preferredItemName(it.n, name, nq), src: [...sSet].join(' + '), done: false };
           } else {
             next.push({ q, n: name, done: false, src: recipeName });
           }
@@ -5956,7 +6057,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                         >✎ Edit</span>
                       )}
                       {ingredients.length > 0 && setGroceryList && (() => {
-                        const missing = ingredients.filter(ing => !groceryNames.has((ing || '').toLowerCase()));
+                        const missing = ingredients.filter(ing => !groceryNames.has(groceryKey(ing)));
                         const allOnList = missing.length === 0;
                         return (
                           <span
@@ -5967,7 +6068,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                                 setTimeout(() => setToast(''), 1800);
                               } else {
                                 ingredients.forEach((ing, i) => {
-                                  if (!groceryNames.has((ing || '').toLowerCase())) toggleIng(i);
+                                  if (!groceryNames.has(groceryKey(ing))) toggleIng(i);
                                 });
                                 setToast(`Added ${missing.length} to grocery list`);
                                 setTimeout(() => setToast(''), 1800);
@@ -6419,7 +6520,7 @@ function AutoPlanScreen({
       if (excludedStaples.has(key)) return false;
       return true;
     };
-    const aggregated = {}; // key=lowercased name → { name, qSet:Set, srcs:Set }
+    const aggregated = {}; // key=groceryKey(name) → { name, contribs:[], srcs:Set }
     const missingIngredients = []; // diagnostic — recipes the picker chose but we couldn't aggregate
     written.forEach(({ dt, recipe }) => {
       const ings = recipe.ingredients || [];
@@ -6432,7 +6533,9 @@ function AutoPlanScreen({
       }
       ings.forEach((ing, i) => {
         if (!ing || isPantry(ing)) return;
-        const key = ing.toLowerCase();
+        // Canonical key so "carrot" from one recipe and "carrots" from
+        // another aggregate into a single line whose portions add up.
+        const key = groceryKey(ing);
         if (!aggregated[key]) aggregated[key] = { name: ing, contribs: [], srcs: new Set() };
         const raw = qtys[i];
         const srcLabel = `${dt} · ${recipe.name}`;
@@ -6445,6 +6548,8 @@ function AutoPlanScreen({
           if (parsed.q) aggregated[key].contribs.push({ q: parsed.q, src: srcLabel });
         }
         aggregated[key].srcs.add(srcLabel);
+        aggregated[key].name = preferredItemName(
+          aggregated[key].name, ing, sumQtyStrings(aggregated[key].contribs.map(c => c.q)));
       });
     });
     if (missingIngredients.length) {
@@ -6540,10 +6645,10 @@ function AutoPlanScreen({
       })
       .filter(it => it !== null);
     const indexByName = {};
-    nextList.forEach((it, i) => { indexByName[it.n.toLowerCase()] = i; });
+    nextList.forEach((it, i) => { indexByName[groceryKey(it.n)] = i; });
     let added = 0, merged = 0;
     Object.values(aggregated).forEach(({ name, contribs, srcs }) => {
-      const key = name.toLowerCase();
+      const key = groceryKey(name);
       const srcStr = [...srcs].join(' + ');
       if (indexByName[key] != null) {
         const i = indexByName[key];
@@ -6553,10 +6658,12 @@ function AutoPlanScreen({
         // Only ADD quantities from sources not already counted on this item —
         // re-applying a plan in append mode must not double the ground beef.
         const newContribs = contribs.filter(c => !existingSrcSet.has(c.src));
+        const nq = sumQtyStrings([nextList[i].q, ...newContribs.map(c => c.q)]);
         nextList[i] = {
           ...nextList[i],
           src: [...mergedSrcs].join(' + '),
-          q: sumQtyStrings([nextList[i].q, ...newContribs.map(c => c.q)]),
+          q: nq,
+          n: preferredItemName(nextList[i].n, name, nq),
         };
         merged++;
       } else {
