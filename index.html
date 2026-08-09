@@ -5032,8 +5032,15 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
           return (
             <div key={cat}>
               <div className="cat-header">{cat}</div>
-              {catItems.map(({ q, n, done, src }) => (
-                <div key={normName(n)} className={`check-row${done ? ' crossed' : ''}`} style={{ paddingTop:10, paddingBottom:10 }}>
+              {/* Key must stay unique even while two rows still share a
+                  canonical name — that happens for one render between a list
+                  arriving with "chicken breasts" + "chicken breast halves" and
+                  the dedupe pass folding them together. Keying on the name
+                  alone gave React duplicate keys there, and it kept the stale
+                  pre-merge rows on screen: storage was correct while the
+                  display showed the item twice, unmerged. */}
+              {catItems.map(({ q, n, done, src }, rowIdx) => (
+                <div key={`${normName(n)}#${rowIdx}`} className={`check-row${done ? ' crossed' : ''}`} style={{ paddingTop:10, paddingBottom:10 }}>
                   <div className={`check-box${done ? ' done' : ''}`} onClick={() => toggle(n)} style={{ cursor:'pointer' }} />
                   <div style={{ flex:1, minWidth:0 }}>
                     <div>{q && <span className="qty">{q}</span>} {n}</div>
