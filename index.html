@@ -4537,7 +4537,13 @@ function GenerateModal({ existing, totalSelected, weekTitle, onChoose, onClose }
    there. Checkout/delivery is the store's own; their cookies keep their
    store location + cart between taps. If a site changes its search path it
    degrades gracefully (lands on the storefront) — fix the template here. */
+// Instacart's own in-store search path — one cart across taps, so with a
+// membership these are the fastest way to build an order. Listed first.
+const instacart = slug => q => `https://www.instacart.ca/store/${slug}/s?k=${encodeURIComponent(q)}`;
+
 const SHOP_STORES = [
+  { id:'ic-superstore', name:'Superstore · Instacart', url: instacart('real-canadian-superstore') },
+  { id:'ic-coop',       name:'Co-op · Instacart',      url: instacart('calgary-co-op') },
   { id:'sof',           name:'Save-On-Foods',        url: q => `https://www.saveonfoods.com/sm/pickup/rsid/1982/results?q=${encodeURIComponent(q)}` },
   { id:'superstore',    name:'Superstore',           url: q => `https://www.realcanadiansuperstore.ca/search?search-bar=${encodeURIComponent(q)}` },
   { id:'walmart',       name:'Walmart',              url: q => `https://www.walmart.ca/search?q=${encodeURIComponent(q)}` },
@@ -4546,7 +4552,7 @@ const SHOP_STORES = [
 
 /* ── Shop-online bottom sheet ── */
 function ShopSheet({ items, toggle, listText, onClose }) {
-  const [storeId, setStoreId] = usePersistedState('ab.shopStore', 'sof');
+  const [storeId, setStoreId] = usePersistedState('ab.shopStore', SHOP_STORES[0].id);
   // Items already tapped this session — tinted so you can see where you are.
   const [opened, setOpened] = useState(() => ({}));
   const [msg, setMsg] = useState('');
