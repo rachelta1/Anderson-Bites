@@ -3879,6 +3879,23 @@ function sumQtyStrings(parts) {
   return [...out, ...unparsed].join(' + ');
 }
 
+/* Split a merged amount for display. Counts and weights can't be added — three
+   recipes wanting 4 chicken breasts, 4 more, and another 1 1/2 lbs total to
+   "8 + 1 1/2 lbs", which is correct but reads like the merge failed. Pulling
+   the bare count out to sit against the item name renders it as
+   "8 chicken breasts + 1 1/2 lbs", where both measures are obviously meant.
+   Display only — the stored amount stays unit-agnostic so it can still be
+   parsed and summed the next time something merges into it. */
+function splitAmountForDisplay(q) {
+  const segs = String(q || '').split(' + ').map(s => s.trim()).filter(Boolean);
+  if (segs.length < 2) return { lead: segs[0] || '', rest: '' };
+  // A "bare" segment is a number with no unit — the one that reads as a count
+  // of the item itself rather than a measure of it.
+  const i = segs.findIndex(s => { const p = parseQtySegment(s); return p && !p.rawUnit; });
+  if (i === -1) return { lead: segs.join(' + '), rest: '' };
+  return { lead: segs[i], rest: segs.filter((_, j) => j !== i).join(' + ') };
+}
+
 /* ── Canonical grocery identity ──
    Two grocery entries are the SAME item when their groceryKey() matches, so
    "2 carrots" merges into "1 carrot" (→ 3 carrots) and "lemon wedge" into
@@ -4655,7 +4672,13 @@ function ShopSheet({ items, toggle, listText, onClose }) {
             >
               <div className="check-box" onClick={() => toggle(it.n)} style={{ cursor:'pointer', flexShrink:0 }} />
               <div onClick={() => shopItem(it)} style={{ flex:1, cursor:'pointer', minWidth:0 }}>
-                <span>{it.q && <span className="qty">{it.q}</span>} {it.n}</span>
+                <span>{(() => {
+                  const { lead, rest } = splitAmountForDisplay(it.q);
+                  return <>
+                    {lead && <span className="qty">{lead}</span>} {it.n}
+                    {rest && <> + <span className="qty">{rest}</span></>}
+                  </>;
+                })()}</span>
                 {opened[it.n] && <span style={{ marginLeft:8, fontSize:12, color:'var(--purple-light)' }}>viewed</span>}
               </div>
               <span onClick={() => shopItem(it)} style={{ fontSize:16, color:'var(--purple)', cursor:'pointer', padding:'2px 6px' }}>↗</span>
@@ -4953,7 +4976,10 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
       const catItems = items.filter(i => !i.done && resolveCat(i.n) === cat);
       if (!catItems.length) return;
       lines.push('', cat);
-      catItems.forEach(i => lines.push(`• ${i.q ? i.q + ' ' : ''}${i.n}`));
+      catItems.forEach(i => {
+        const { lead, rest } = splitAmountForDisplay(i.q);
+        lines.push(`• ${lead ? lead + ' ' : ''}${i.n}${rest ? ' + ' + rest : ''}`);
+      });
     });
     return lines.join('\n');
   };
@@ -5043,7 +5069,13 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
                 <div key={`${normName(n)}#${rowIdx}`} className={`check-row${done ? ' crossed' : ''}`} style={{ paddingTop:10, paddingBottom:10 }}>
                   <div className={`check-box${done ? ' done' : ''}`} onClick={() => toggle(n)} style={{ cursor:'pointer' }} />
                   <div style={{ flex:1, minWidth:0 }}>
-                    <div>{q && <span className="qty">{q}</span>} {n}</div>
+                    <div>{(() => {
+                      const { lead, rest } = splitAmountForDisplay(q);
+                      return <>
+                        {lead && <span className="qty">{lead}</span>} {n}
+                        {rest && <> + <span className="qty">{rest}</span></>}
+                      </>;
+                    })()}</div>
                     <div style={{ fontSize:12, color:'#444', marginTop:2 }}>{src}</div>
                   </div>
                   <span
