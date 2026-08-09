@@ -1561,7 +1561,29 @@ EMOJI: one cooking-related emoji that best represents the dish (e.g. 🍝 🍕 �
 
 Output JSON only.`;
 
-async function callClaude({ apiKey, system, user, model }) {
+/* Two model tiers. Recipe parsing and meal planning are the calls where
+   getting it wrong is visible (a dropped word in an ingredient line becomes a
+   wrong grocery item), so they use the stronger model. Grocery categorization
+   is high-volume and trivial — one label per item — so it runs on the cheap
+   one at roughly a third the price. */
+const MODEL_SMART = 'claude-sonnet-5';  // recipe import + meal planning
+const MODEL_FAST = 'claude-haiku-4-5';  // grocery categorization
+
+/* Sonnet 5 thinks by default when `thinking` is omitted, and thinking spends
+   from the SAME max_tokens budget as the answer — so a long recipe could get
+   truncated mid-JSON. Every call here wants structured output rather than
+   deliberation, so they opt out explicitly and keep the whole budget for the
+   answer. (Haiku 4.5 predates this and must not be sent the field at all.) */
+const NO_THINKING = { type: 'disabled' };
+
+async function callClaude({ apiKey, system, user, model, maxTokens, thinking }) {
+  const body = {
+    model: model || MODEL_SMART,
+    max_tokens: maxTokens || 8192,
+    system,
+    messages: [{ role: 'user', content: user }],
+  };
+  if (thinking) body.thinking = thinking;
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -1570,12 +1592,7 @@ async function callClaude({ apiKey, system, user, model }) {
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
     },
-    body: JSON.stringify({
-      model: model || 'claude-sonnet-4-6',
-      max_tokens: 4096,
-      system,
-      messages: [{ role: 'user', content: user }],
-    }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     const text = await resp.text();
@@ -1612,7 +1629,9 @@ async function classifyGroceriesWithLLM({ apiKey, names }) {
 Return ONLY JSON, no prose, no markdown. Shape:
 { "<item name as given>": { "category": "<exact label>", "isStaple": <true|false> } }`;
   const user = `Classify each of these grocery items:\n${JSON.stringify(names)}\n\nReturn the JSON mapping.`;
-  const text = await callClaude({ apiKey, system, user });
+  // One short label per item — the cheap model handles this well, and this is
+  // the highest-volume call in the app (every new grocery item hits it once).
+  const text = await callClaude({ apiKey, system, user, model: MODEL_FAST, maxTokens: 2048 });
   const parsed = extractJson(text);
   // Normalize: keep only entries with a valid category. Tolerate the older
   // string-only shape ({ "<name>": "<label>" }) for backward compatibility.
@@ -2340,7 +2359,7 @@ Return ONLY JSON, no prose, no markdown.`;
 
   const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
 
-  const text = await callClaude({ apiKey, system, user });
+  const text = await callClaude({ apiKey, system, user, thinking: NO_THINKING });
   const parsed = extractJson(text);
   if (!parsed || !Array.isArray(parsed.picks)) throw new Error('Bad LLM response shape');
 
@@ -5667,6 +5686,8 @@ function AddRecipeURLScreen({ onBack, apiKey, onSave, onTab }) {
         apiKey,
         system: RECIPE_SCHEMA_PROMPT,
         user: userMsg,
+        thinking: NO_THINKING,
+        maxTokens: 16000,
       });
       const parsed = extractJson(text);
       const recipe = normalizeRecipeFromLlm(parsed, { url: trimmed, image: ogImage });
@@ -5757,6 +5778,8 @@ function AddRecipeDescribeScreen({ onBack, apiKey, onSave, onTab }) {
       const out = await callClaude({
         apiKey,
         system: RECIPE_SCHEMA_PROMPT,
+        thinking: NO_THINKING,
+        maxTokens: 16000,
         user: `Build a recipe from this description. Leave "url" as an empty string. Description:\n\n${text}`,
       });
       const parsed = extractJson(out);
