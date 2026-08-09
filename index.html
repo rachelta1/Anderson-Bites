@@ -1570,13 +1570,19 @@ const MODEL_SMART = 'claude-sonnet-5';  // recipe import + meal planning
 const MODEL_FAST = 'claude-haiku-4-5';  // grocery categorization
 
 /* Sonnet 5 thinks by default when `thinking` is omitted, and thinking spends
-   from the SAME max_tokens budget as the answer — so a long recipe could get
-   truncated mid-JSON. Every call here wants structured output rather than
-   deliberation, so they opt out explicitly and keep the whole budget for the
-   answer. (Haiku 4.5 predates this and must not be sent the field at all.) */
-const NO_THINKING = { type: 'disabled' };
+   from the SAME max_tokens budget as the answer — so an unbounded setting can
+   truncate a long recipe mid-JSON. Both modes are therefore explicit here.
+   (Haiku 4.5 predates this and must not be sent the field at all.)
 
-async function callClaude({ apiKey, system, user, model, maxTokens, thinking }) {
+   Recipe import gets THINKING: it reads a messy page once and every ingredient
+   line it garbles turns into a wrong grocery item later, and it runs at most a
+   few times a week. Meal planning and categorization stay fast — they're
+   picking from a fixed library and a fixed label set, and the user waits on
+   them more often. */
+const NO_THINKING = { type: 'disabled' };
+const THINKING = { type: 'adaptive' };
+
+async function callClaude({ apiKey, system, user, model, maxTokens, thinking, effort }) {
   const body = {
     model: model || MODEL_SMART,
     max_tokens: maxTokens || 8192,
@@ -1584,6 +1590,9 @@ async function callClaude({ apiKey, system, user, model, maxTokens, thinking }) 
     messages: [{ role: 'user', content: user }],
   };
   if (thinking) body.thinking = thinking;
+  // Stated rather than inherited: on the one call that pays for thinking, how
+  // deep it goes should be visible here, not left to an API default.
+  if (effort) body.output_config = { effort };
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -5692,7 +5701,8 @@ function AddRecipeURLScreen({ onBack, apiKey, onSave, onTab }) {
         apiKey,
         system: RECIPE_SCHEMA_PROMPT,
         user: userMsg,
-        thinking: NO_THINKING,
+        thinking: THINKING,
+        effort: 'high',
         maxTokens: 16000,
       });
       const parsed = extractJson(text);
@@ -5784,7 +5794,8 @@ function AddRecipeDescribeScreen({ onBack, apiKey, onSave, onTab }) {
       const out = await callClaude({
         apiKey,
         system: RECIPE_SCHEMA_PROMPT,
-        thinking: NO_THINKING,
+        thinking: THINKING,
+        effort: 'high',
         maxTokens: 16000,
         user: `Build a recipe from this description. Leave "url" as an empty string. Description:\n\n${text}`,
       });
