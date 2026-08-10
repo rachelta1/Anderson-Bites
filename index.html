@@ -2904,6 +2904,7 @@ function TabBar({ active, onTab }) {
     { icon: '🛒', label: 'List' },
     { icon: 'svg', label: 'Recipes' },
     { icon: '⚙️', label: 'Auto-Plan' },
+    { icon: '🧳', label: 'Packing' },
   ];
   return (
     <div className="tab-bar">
@@ -7430,6 +7431,268 @@ function AutoPlanScreen({
 /* ═══════════════════════════════════════════
    APP — NAVIGATION
 ═══════════════════════════════════════════ */
+/* ── Packing list ──────────────────────────────────────────────────────────
+   A second, unrelated checklist living in the same app. Its state is kept
+   under its own `ab.packing.v1` key rather than folded into any meal data —
+   the two models have nothing in common — and it rides the existing Firestore
+   sync for free, since that syncs every `ab.*` key. So both phones see the
+   same boxes ticked with no server, no extra hosting, and no new login. */
+const uidPk = () => 'p' + Math.random().toString(36).slice(2, 9);
+
+const PACKING_SEED = {
+  goingToFernie: false,
+  categories: [
+    { id: uidPk(), name: 'Already in Suitcase', items: [
+      'Toiletry bag', 'Kids pyjamas', 'Swimsuits', 'Phone chargers',
+      'First aid kit', 'Sunscreen',
+    ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+    { id: uidPk(), name: 'Upstairs Items', items: [
+      'Clothes for each day', 'Underwear & socks', 'Toothbrushes', 'Hairbrush',
+      'Medications', 'Glasses / contacts', 'Kids stuffies',
+    ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+    { id: uidPk(), name: 'Downstairs items', items: [
+      'Snacks for the drive', 'Water bottles', 'Cooler bag', 'Stroller',
+      'Shoes & boots', 'Winter jackets',
+    ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+    { id: uidPk(), name: 'Last minute items', items: [
+      'Phones', 'Wallet & keys', 'Laptop', 'Fridge items', 'Turn down thermostat',
+      'Lock back door',
+    ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+    { id: uidPk(), name: 'Other', items: [
+      'Board games', 'Books', 'iPad & headphones', 'Camera',
+    ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+    { id: uidPk(), name: 'In Fernie', items: [
+      'Ski gear', 'Helmets', 'Winter boots', 'Toboggan', 'Extra towels',
+    ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+  ],
+};
+
+function PackingScreen({ onTab, data, setData }) {
+  const [editMode, setEditMode] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  const cats = Array.isArray(data && data.categories) ? data.categories : [];
+  const goingToFernie = !!(data && data.goingToFernie);
+
+  // "In Fernie" holds things that live at the Fernie place. When this trip IS
+  // to Fernie they're already there and don't need packing, so the category
+  // collapses. Matched on name so a renamed/added category still works.
+  const isFernie = (c) => /fernie/i.test(c.name || '');
+  // NOTE: `!editMode` is load-bearing. Dimming during edit mode would make the
+  // category impossible to edit — the exact bug called out in the brief.
+  const isCollapsed = (c) => goingToFernie && !editMode && isFernie(c);
+
+  const update = (fn) => setData(prev => {
+    const next = { ...prev, categories: (prev.categories || []).map(c => ({ ...c, items: [...(c.items || [])] })) };
+    fn(next);
+    return next;
+  });
+
+  const toggleItem = (catId, itemId) => update(next => {
+    const c = next.categories.find(c => c.id === catId);
+    if (!c) return;
+    c.items = c.items.map(it => it.id === itemId ? { ...it, packed: !it.packed } : it);
+  });
+
+  const resetAll = () => {
+    update(next => { next.categories.forEach(c => { c.items = c.items.map(it => ({ ...it, packed: false })); }); });
+    setConfirmReset(false);
+  };
+
+  const setFernie = (on) => setData(prev => ({ ...prev, goingToFernie: on }));
+
+  /* ── edit-mode mutations: these change the list itself, and because the
+     whole object persists they become the baseline for every future trip ── */
+  const addItem = (catId) => update(next => {
+    const c = next.categories.find(c => c.id === catId);
+    if (c) c.items.push({ id: uidPk(), name: '', packed: false });
+  });
+  const renameItem = (catId, itemId, name) => update(next => {
+    const c = next.categories.find(c => c.id === catId);
+    if (c) c.items = c.items.map(it => it.id === itemId ? { ...it, name } : it);
+  });
+  const deleteItem = (catId, itemId) => update(next => {
+    const c = next.categories.find(c => c.id === catId);
+    if (c) c.items = c.items.filter(it => it.id !== itemId);
+  });
+  const moveItem = (catId, idx, dir) => update(next => {
+    const c = next.categories.find(c => c.id === catId);
+    if (!c) return;
+    const j = idx + dir;
+    if (j < 0 || j >= c.items.length) return;
+    [c.items[idx], c.items[j]] = [c.items[j], c.items[idx]];
+  });
+  const addCategory = () => update(next => {
+    next.categories.push({ id: uidPk(), name: '', items: [] });
+  });
+  const renameCategory = (catId, name) => update(next => {
+    next.categories = next.categories.map(c => c.id === catId ? { ...c, name } : c);
+  });
+  const deleteCategory = (catId) => update(next => {
+    next.categories = next.categories.filter(c => c.id !== catId);
+  });
+  const moveCategory = (idx, dir) => update(next => {
+    const j = idx + dir;
+    if (j < 0 || j >= next.categories.length) return;
+    [next.categories[idx], next.categories[j]] = [next.categories[j], next.categories[idx]];
+  });
+
+  // Overall progress skips a collapsed category — those items aren't being
+  // packed this trip, so counting them would make the total unreachable.
+  const counted = cats.filter(c => !isCollapsed(c));
+  const totalItems = counted.reduce((n, c) => n + (c.items || []).length, 0);
+  const totalPacked = counted.reduce((n, c) => n + (c.items || []).filter(i => i.packed).length, 0);
+
+  const miniBtn = {
+    padding: '4px 8px', borderRadius: 6, cursor: 'pointer', userSelect: 'none',
+    background: '#131320', border: '1px solid var(--border)', color: 'var(--text-dim)',
+    fontSize: 13, lineHeight: 1.2, flexShrink: 0,
+  };
+
+  return (
+    <div className="screen-body">
+      <div className="screen-header">
+        <div className="screen-title">Packing</div>
+        <span style={{ fontSize: 13, color: 'var(--text-dimmer)' }}>{totalPacked} of {totalItems}</span>
+      </div>
+
+      <div className="progress-bar">
+        <div className="progress-fill" style={{ width: `${totalItems ? (totalPacked / totalItems) * 100 : 0}%` }} />
+      </div>
+
+      {/* Trip controls */}
+      <div style={{ display: 'flex', gap: 8, padding: '0 16px 10px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{
+          flex: 1, minWidth: 150, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 8, padding: '8px 12px', borderRadius: 10,
+          background: goingToFernie ? 'var(--purple-mid)' : '#131320',
+          border: `1.5px solid ${goingToFernie ? 'var(--purple)' : 'var(--border)'}`,
+        }}>
+          <span style={{ fontSize: 15, color: goingToFernie ? 'var(--purple-light)' : 'var(--text-dim)' }}>
+            🏔 Going to Fernie?
+          </span>
+          <Toggle on={goingToFernie} onChange={() => setFernie(!goingToFernie)} />
+        </div>
+        <div
+          onClick={() => setEditMode(!editMode)}
+          style={{
+            padding: '10px 12px', borderRadius: 10, cursor: 'pointer', fontSize: 15,
+            background: editMode ? 'var(--purple-mid)' : '#131320',
+            border: `1.5px solid ${editMode ? 'var(--purple)' : 'var(--border)'}`,
+            color: editMode ? 'var(--purple-light)' : 'var(--text-dim)',
+          }}
+        >{editMode ? '✓ Done' : '✎ Edit list'}</div>
+        {!editMode && totalItems > 0 && (
+          <div
+            onClick={() => setConfirmReset(true)}
+            title="Uncheck everything for a new trip"
+            style={{ padding: '10px 12px', borderRadius: 10, cursor: 'pointer', fontSize: 15,
+                     background: '#131320', border: '1.5px solid var(--border)', color: 'var(--text-dim)' }}
+          >↺ Reset</div>
+        )}
+      </div>
+
+      {editMode && (
+        <div style={{ padding: '0 16px 8px', fontSize: 12, color: 'var(--text-dimmer)', lineHeight: 1.5 }}>
+          Editing the list itself — changes stick for every future trip. Ticked boxes aren't affected.
+        </div>
+      )}
+
+      <div className="pane">
+        {cats.map((cat, ci) => {
+          const items = cat.items || [];
+          const packed = items.filter(i => i.packed).length;
+          const collapsed = isCollapsed(cat);
+          return (
+            <div key={cat.id} style={{ marginBottom: 6, opacity: collapsed ? 0.4 : 1 }}>
+              <div className="cat-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {editMode ? (
+                  <>
+                    <input
+                      value={cat.name}
+                      onChange={e => renameCategory(cat.id, e.target.value)}
+                      placeholder="category name"
+                      style={{ flex: 1, minWidth: 0, background: '#0f0f18', border: '1px solid var(--border)',
+                               borderRadius: 6, padding: '4px 8px', color: 'var(--text)',
+                               fontFamily: 'var(--font)', fontSize: 14 }}
+                    />
+                    <span onClick={() => moveCategory(ci, -1)} style={miniBtn}>▲</span>
+                    <span onClick={() => moveCategory(ci, 1)} style={miniBtn}>▼</span>
+                    <span onClick={() => deleteCategory(cat.id)} style={{ ...miniBtn, color: '#e06c6c' }}>🗑</span>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ flex: 1 }}>{cat.name}</span>
+                    <span style={{ fontSize: 12, color: 'var(--text-dimmer)' }}>
+                      {collapsed ? 'already there' : `${packed}/${items.length} packed`}
+                    </span>
+                  </>
+                )}
+              </div>
+
+              {/* Collapsed only hides the rows in normal mode; edit mode always
+                  renders them so the category stays editable. */}
+              {!collapsed && items.map((it, ii) => (
+                <div key={it.id} className={`check-row${!editMode && it.packed ? ' crossed' : ''}`}
+                     style={{ paddingTop: 8, paddingBottom: 8, gap: 8 }}>
+                  {editMode ? (
+                    <>
+                      <input
+                        value={it.name}
+                        onChange={e => renameItem(cat.id, it.id, e.target.value)}
+                        placeholder="item"
+                        style={{ flex: 1, minWidth: 0, background: '#0f0f18', border: '1px solid var(--border)',
+                                 borderRadius: 6, padding: '6px 8px', color: 'var(--text)',
+                                 fontFamily: 'var(--font)', fontSize: 15 }}
+                      />
+                      <span onClick={() => moveItem(cat.id, ii, -1)} style={miniBtn}>▲</span>
+                      <span onClick={() => moveItem(cat.id, ii, 1)} style={miniBtn}>▼</span>
+                      <span onClick={() => deleteItem(cat.id, it.id)} style={{ ...miniBtn, color: '#e06c6c' }}>🗑</span>
+                    </>
+                  ) : (
+                    <>
+                      <div className={`check-box${it.packed ? ' done' : ''}`}
+                           onClick={() => toggleItem(cat.id, it.id)} style={{ cursor: 'pointer' }} />
+                      <div style={{ flex: 1, cursor: 'pointer' }} onClick={() => toggleItem(cat.id, it.id)}>{it.name}</div>
+                    </>
+                  )}
+                </div>
+              ))}
+
+              {editMode && (
+                <div onClick={() => addItem(cat.id)}
+                     style={{ margin: '6px 0 2px', padding: '7px 10px', borderRadius: 8, cursor: 'pointer',
+                              border: '1.5px dashed var(--border)', background: '#0f0f18',
+                              color: 'var(--text-dimmer)', fontSize: 14 }}>+ Add item</div>
+              )}
+            </div>
+          );
+        })}
+
+        {editMode && (
+          <div onClick={addCategory}
+               style={{ margin: '10px 0 4px', padding: '10px', borderRadius: 8, cursor: 'pointer',
+                        textAlign: 'center', border: '1.5px dashed var(--purple-bg)',
+                        background: '#0f0f18', color: 'var(--purple-light)', fontSize: 15 }}>+ Add category</div>
+        )}
+        <div style={{ height: 12 }} />
+      </div>
+
+      <TabBar active={4} onTab={onTab} />
+
+      {confirmReset && (
+        <ConfirmSheet
+          title="Start a new trip?"
+          body={`This unchecks all ${totalPacked} packed item${totalPacked === 1 ? '' : 's'}. The list itself is kept.`}
+          confirmLabel="Uncheck all"
+          onConfirm={resetAll}
+          onClose={() => setConfirmReset(false)}
+        />
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState(0);
   const [subscreen, setSubscreen] = useState(null); // 'recipe-detail' | 'add-recipe' | 'add-url' | 'add-describe'
@@ -7459,6 +7722,7 @@ function App() {
   // pruned items after they were already on screen.
   const [catCache, setCatCache] = usePersistedState('ab.catCache', {});
   const [persistedKey, setPersistedKey] = usePersistedState('ab.apiKey', '');
+  const [packing, setPacking] = usePersistedState('ab.packing.v1', PACKING_SEED);
   const apiKey = EMBEDDED_API_KEY || persistedKey;
   const [showSettings, setShowSettings] = useState(false);
 
@@ -7645,6 +7909,11 @@ function App() {
         catCache={catCache}
         setCatCache={setCatCache}
         onSettings={() => setShowSettings(true)}
+      />;
+      case 4: return <PackingScreen
+        onTab={handleTab}
+        data={packing}
+        setData={setPacking}
       />;
       default: return <WeekScreen onTab={handleTab} recipeDB={recipeDB} />;
     }
