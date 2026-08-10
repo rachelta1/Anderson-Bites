@@ -1,7 +1,7 @@
 {
   "name": "Anderson Bites",
-  "short_name": "AndersonBites",
-  "description": "Personal meal planner — recipe library, weekly plan, autoplan, and grocery list.",
+  "short_name": "AndersonFam",
+  "description": "Personal meal planner \u2014 recipe library, weekly plan, autoplan, and grocery list.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
@@ -9,8 +9,23 @@
   "background_color": "#0a0a12",
   "theme_color": "#1a0a2e",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }

@@ -13,7 +13,7 @@
      "Add to Home Screen" launch full-screen with the right icon and title -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="AndersonBites">
+<meta name="apple-mobile-web-app-title" content="AndersonFam">
 <link rel="apple-touch-icon" href="icon-180.png">
 
 <!-- Favicon (browser tab icon, PC + Android) -->
@@ -7507,6 +7507,13 @@ function PackingScreen({ onTab, data, setData }) {
 
   const setFernie = (on) => setData(prev => ({ ...prev, goingToFernie: on }));
 
+  // Fold a finished section away. Persisted with the list (so it survives a
+  // reload) and deliberately NOT applied in edit mode, where every section
+  // must stay reachable.
+  const toggleCollapse = (catId) => update(next => {
+    next.categories = next.categories.map(c => c.id === catId ? { ...c, collapsed: !c.collapsed } : c);
+  });
+
   /* ── edit-mode mutations: these change the list itself, and because the
      whole object persists they become the baseline for every future trip ── */
   const addItem = (catId) => update(next => {
@@ -7614,9 +7621,11 @@ function PackingScreen({ onTab, data, setData }) {
         {cats.map((cat, ci) => {
           const items = cat.items || [];
           const packed = items.filter(i => i.packed).length;
-          const collapsed = isCollapsed(cat);
+          const fernieHidden = isCollapsed(cat);          // trip is to Fernie
+          const manualHidden = !editMode && !!cat.collapsed;  // user folded it
+          const hideRows = fernieHidden || manualHidden;
           return (
-            <div key={cat.id} style={{ marginBottom: 6, opacity: collapsed ? 0.4 : 1 }}>
+            <div key={cat.id} style={{ marginBottom: 6, opacity: fernieHidden ? 0.4 : 1 }}>
               <div className="cat-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {editMode ? (
                   <>
@@ -7634,17 +7643,31 @@ function PackingScreen({ onTab, data, setData }) {
                   </>
                 ) : (
                   <>
-                    <span style={{ flex: 1 }}>{cat.name}</span>
+                    {/* Whole header folds the section. Not offered while the
+                        Fernie toggle has already collapsed it — turn that off
+                        instead, or it's two competing ways to hide one thing. */}
+                    <span
+                      onClick={fernieHidden ? undefined : () => toggleCollapse(cat.id)}
+                      style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6,
+                               cursor: fernieHidden ? 'default' : 'pointer', userSelect: 'none' }}
+                    >
+                      {!fernieHidden && (
+                        <span style={{ fontSize: 11, color: 'var(--text-dimmer)', width: 10 }}>
+                          {manualHidden ? '▸' : '▾'}
+                        </span>
+                      )}
+                      {cat.name}
+                    </span>
                     <span style={{ fontSize: 12, color: 'var(--text-dimmer)' }}>
-                      {collapsed ? 'already there' : `${packed}/${items.length} packed`}
+                      {fernieHidden ? 'already there' : `${packed}/${items.length} packed`}
                     </span>
                   </>
                 )}
               </div>
 
-              {/* Collapsed only hides the rows in normal mode; edit mode always
-                  renders them so the category stays editable. */}
-              {!collapsed && items.map((it, ii) => (
+              {/* Both hide reasons are gated on !editMode, so every section is
+                  always reachable while editing. */}
+              {!hideRows && items.map((it, ii) => (
                 <div key={it.id} className={`check-row${!editMode && it.packed ? ' crossed' : ''}`}
                      style={{ paddingTop: 8, paddingBottom: 8, gap: 8 }}>
                   {editMode ? (
