@@ -4584,6 +4584,10 @@ const instacart = slug => q => `https://www.instacart.ca/store/${slug}/s?k=${enc
 const SHOP_STORES = [
   { id:'ic-superstore', name:'Superstore · Instacart', url: instacart('real-canadian-superstore') },
   { id:'ic-coop',       name:'Co-op · Instacart',      url: instacart('calgary-co-op') },
+  // Costco's Canadian Instacart storefront. Instacart's own launch notice for
+  // Canada gives this slug; a `costco-canada` variant also exists (it's what
+  // Costco's own sameday.costco.ca uses), so that's the fallback if this 404s.
+  { id:'ic-costco',     name:'Costco · Instacart',     url: instacart('costco') },
   { id:'sof',           name:'Save-On-Foods',        url: q => `https://www.saveonfoods.com/sm/pickup/rsid/1982/results?q=${encodeURIComponent(q)}` },
   { id:'superstore',    name:'Superstore',           url: q => `https://www.realcanadiansuperstore.ca/search?search-bar=${encodeURIComponent(q)}` },
   { id:'walmart',       name:'Walmart',              url: q => `https://www.walmart.ca/search?q=${encodeURIComponent(q)}` },
