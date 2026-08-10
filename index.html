@@ -2903,8 +2903,8 @@ function TabBar({ active, onTab }) {
     { icon: '📅', label: 'Week' },
     { icon: '🛒', label: 'List' },
     { icon: 'svg', label: 'Recipes' },
-    { icon: '⚙️', label: 'Auto-Plan' },
     { icon: '🧳', label: 'Packing' },
+    { icon: '⚙️', label: 'Auto-Plan' },
   ];
   return (
     <div className="tab-bar">
@@ -7423,7 +7423,7 @@ function AutoPlanScreen({
         />
       )}
 
-      <TabBar active={3} onTab={onTab} />
+      <TabBar active={4} onTab={onTab} />
     </div>
   );
 }
@@ -7690,7 +7690,7 @@ function PackingScreen({ onTab, data, setData }) {
         <div style={{ height: 12 }} />
       </div>
 
-      <TabBar active={4} onTab={onTab} />
+      <TabBar active={3} onTab={onTab} />
 
       {confirmReset && (
         <ConfirmSheet
@@ -7913,7 +7913,7 @@ function App() {
         onAddRecipe={handleAddRecipe}
         recipeDB={recipeDB}
       />;
-      case 3: return <AutoPlanScreen
+      case 4: return <AutoPlanScreen
         onTab={handleTab}
         recipeDB={recipeDB}
         weekMap={weekMap}
@@ -7928,7 +7928,7 @@ function App() {
         setCatCache={setCatCache}
         onSettings={() => setShowSettings(true)}
       />;
-      case 4: return <PackingScreen
+      case 3: return <PackingScreen
         onTab={handleTab}
         data={packing}
         setData={setPacking}
