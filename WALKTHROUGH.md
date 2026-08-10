@@ -1,4 +1,4 @@
-# Anderson Bites — Code Walkthrough
+# AndersonFam — Code Walkthrough
 
 A plain-English map of `index.html` for non-coders. Read top-to-bottom once
 to get the lay of the land, then keep it open as a reference when you (or
@@ -8,7 +8,7 @@ Claude) need to find or change something.
 
 ## What this app is, in one paragraph
 
-Anderson Bites is a **single-file web app** — `index.html` is the whole
+AndersonFam is a **single-file web app** — `index.html` is the whole
 program. When you open it in a browser (or as a PWA on your phone), the
 browser downloads that one file, plus a couple of icons and a `manifest.json`,
 and that's enough to run the app. There's no server, no backend you control,
@@ -46,16 +46,20 @@ search for one in your editor with Ctrl+F.
 
 This is browser metadata. Three things matter:
 
-- **`<title>Anderson Bites — Meal Planner</title>`** — the tab title in
+- **`<title>AndersonFam — Meals & Packing</title>`** — the tab title in
   desktop browsers.
 - **`<link rel="manifest" href="manifest.json">`** — points Android/Chrome
   at the file that says "this site can be installed as an app, here's the
   icon and name."
-- **`<meta name="apple-mobile-web-app-title" content="Bites">`** — iOS
+- **`<meta name="apple-mobile-web-app-title" content="AndersonFam">`** — iOS
   Safari **ignores** the manifest's name and reads this tag instead. So
-  the iPhone home-screen label is set here, not in manifest.json. (Right
-  now this says "Bites" — we should update it to "AndersonBites" too if
-  you want consistency.)
+  the iPhone home-screen label is set here, not in manifest.json. Android
+  reads `short_name` from manifest.json instead, so the two have to be
+  kept in step — both currently say "AndersonFam".
+
+  Note that iOS only reads this when the icon is *added* to the home
+  screen. Renaming it here does not rename an icon someone already
+  pinned; they have to delete it and re-add it.
 
 The three `<script src="https://unpkg.com/...">` lines pull in React and
 Babel from a free CDN. That's how this file can write modern React code

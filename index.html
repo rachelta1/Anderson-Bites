@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>Anderson Bites — Meal Planner</title>
+<title>AndersonFam — Meals & Packing</title>
 
 <!-- PWA: web app manifest (Android Chrome reads this for icon, name, theme) -->
 <link rel="manifest" href="manifest.json">
@@ -616,6 +616,11 @@ import {
   getFirestore, doc, getDoc, setDoc, serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
 
+// DO NOT rename the "anderson-bites" strings below. They are not a display
+// name — they identify the actual Firebase project holding everyone's synced
+// data. The app was renamed to AndersonFam; this was deliberately left alone,
+// because changing it points the app at a project that doesn't exist and
+// silently breaks sign-in and sync on every device.
 const firebaseConfig = {
   apiKey: "AIzaSyDOQTSKFfPPF2IR2KokETDsehLWhIBlxeA",
   authDomain: "anderson-bites.firebaseapp.com",

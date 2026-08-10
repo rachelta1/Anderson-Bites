@@ -1,7 +1,7 @@
 {
-  "name": "Anderson Bites",
+  "name": "AndersonFam",
   "short_name": "AndersonFam",
-  "description": "Personal meal planner \u2014 recipe library, weekly plan, autoplan, and grocery list.",
+  "description": "Family meal planner and packing list \u2014 recipes, weekly plan, grocery list, and trip packing.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
