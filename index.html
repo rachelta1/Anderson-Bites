@@ -7443,26 +7443,32 @@ const PACKING_SEED = {
   goingToFernie: false,
   categories: [
     { id: uidPk(), name: 'Already in Suitcase', items: [
-      'Toiletry bag', 'Kids pyjamas', 'Swimsuits', 'Phone chargers',
-      'First aid kit', 'Sunscreen',
+      'Bottle brush', 'Bottle rack', 'Bristle brush cleaner', 'Monitor',
+      'Black out curtain', 'Toothbrush / floss', 'USBC charger', 'Advil/Tylenol',
+      'Sunscreen', 'Bath stuff', 'Bum cream', 'Pacifier', 'Smoothie cup',
+      'Vitamin D',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Upstairs Items', items: [
-      'Clothes for each day', 'Underwear & socks', 'Toothbrushes', 'Hairbrush',
-      'Medications', 'Glasses / contacts', 'Kids stuffies',
+      'Clothes/Underwear/Swimsuits/socks', 'Diapers & night (Chase/Hazel)',
+      'Wipes', 'Books', 'Sleep sack', 'Stuffed animals & blanket',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Downstairs items', items: [
-      'Snacks for the drive', 'Water bottles', 'Cooler bag', 'Stroller',
-      'Shoes & boots', 'Winter jackets',
+      'Toys', 'Diaper bag', 'Bottles (Chase/Hazel)', 'Hat (x2)', 'Snow pants',
+      'Jacket (x2)', 'Formula',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Last minute items', items: [
-      'Phones', 'Wallet & keys', 'Laptop', 'Fridge items', 'Turn down thermostat',
-      'Lock back door',
+      'White noise (charge it before leaving)', 'Kids water',
+      'Snacks for car in lunchbox', 'Tablets for car', 'Shoes/socks/Jacket',
+      'Potty', 'Stuffed animals', 'Baby brezza', 'Pacifiers',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Other', items: [
-      'Board games', 'Books', 'iPad & headphones', 'Camera',
+      'Purse', 'Sunglasses', 'Computer', 'Rain coat', 'Water bottle',
+      'Ear plugs and eyemask', 'Contacts', 'Skis Chase',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+    // Kept at the Fernie place — collapses when "Going to Fernie?" is on,
+    // since there's nothing to pack for a trip there.
     { id: uidPk(), name: 'In Fernie', items: [
-      'Ski gear', 'Helmets', 'Winter boots', 'Toboggan', 'Extra towels',
+      'Pack n play (x2)', 'Toys', 'Stroller/Carrier', 'Plate/spoon', 'High chair',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
   ],
 };
@@ -7562,16 +7568,22 @@ function PackingScreen({ onTab, data, setData }) {
 
       {/* Trip controls */}
       <div style={{ display: 'flex', gap: 8, padding: '0 16px 10px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <div style={{
-          flex: 1, minWidth: 150, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          gap: 8, padding: '8px 12px', borderRadius: 10,
-          background: goingToFernie ? 'var(--purple-mid)' : '#131320',
-          border: `1.5px solid ${goingToFernie ? 'var(--purple)' : 'var(--border)'}`,
-        }}>
+        {/* Whole pill is the tap target — a bare switch is a small thing to hit
+            one-handed while packing. The Toggle's own handler is a no-op so the
+            click it bubbles up here isn't counted twice. */}
+        <div
+          onClick={() => setFernie(!goingToFernie)}
+          style={{
+            flex: 1, minWidth: 150, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: 8, padding: '8px 12px', borderRadius: 10, cursor: 'pointer',
+            background: goingToFernie ? 'var(--purple-mid)' : '#131320',
+            border: `1.5px solid ${goingToFernie ? 'var(--purple)' : 'var(--border)'}`,
+          }}
+        >
           <span style={{ fontSize: 15, color: goingToFernie ? 'var(--purple-light)' : 'var(--text-dim)' }}>
             🏔 Going to Fernie?
           </span>
-          <Toggle on={goingToFernie} onChange={() => setFernie(!goingToFernie)} />
+          <Toggle on={goingToFernie} onChange={() => {}} />
         </div>
         <div
           onClick={() => setEditMode(!editMode)}
@@ -7722,7 +7734,7 @@ function App() {
   // pruned items after they were already on screen.
   const [catCache, setCatCache] = usePersistedState('ab.catCache', {});
   const [persistedKey, setPersistedKey] = usePersistedState('ab.apiKey', '');
-  const [packing, setPacking] = usePersistedState('ab.packing.v1', PACKING_SEED);
+  const [packing, setPacking] = usePersistedState('ab.packing.v2', PACKING_SEED);
   const apiKey = EMBEDDED_API_KEY || persistedKey;
   const [showSettings, setShowSettings] = useState(false);
 
@@ -7760,6 +7772,12 @@ function App() {
   // demands (8 full bell peppers vs 8 mini ones). Only rewrites the exact
   // wrong value so user edits made via the ingredient editor are never
   // clobbered. Gated per device like the other migrations.
+  // The first cut of the packing list shipped with placeholder items; the real
+  // list supersedes it under a new key. Drop the old one so it stops syncing.
+  useEffect(() => {
+    try { if (localStorage.getItem('ab.packing.v1')) localStorage.removeItem('ab.packing.v1'); } catch {}
+  }, []);
+
   useEffect(() => {
     if (localStorage.getItem('ab.migration.qtyFixV1') === 'done') return;
     const FIXES = [
