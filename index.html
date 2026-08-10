@@ -309,6 +309,14 @@ body {
 .qty { color: var(--purple); font-size: 18px; min-width: 32px; }
 .cat-header { font-size: 14px; color: #444; text-transform: uppercase; letter-spacing: 0.08em; padding: 10px 0 4px; }
 
+/* ── Packing list sizing ──
+   Bigger than the grocery list's: this one is worked through one-handed,
+   often holding a child or a bag, so the 18px checkbox was a miss-prone
+   target. Scoped to .packing-pane rather than changing .check-box globally. */
+.packing-pane .check-row { padding: 13px 0; align-items: center; }
+.packing-pane .check-box { width: 26px; height: 26px; border-radius: 6px; margin-top: 0; }
+.packing-pane .cat-header { font-size: 18px; letter-spacing: 0.04em; padding: 15px 0 6px; }
+
 /* ── Recipe card ── */
 .recipe-card {
   display: flex; align-items: center; gap: 10px;
@@ -7617,7 +7625,7 @@ function PackingScreen({ onTab, data, setData }) {
         </div>
       )}
 
-      <div className="pane">
+      <div className="pane packing-pane">
         {cats.map((cat, ci) => {
           const items = cat.items || [];
           const packed = items.filter(i => i.packed).length;
@@ -7634,8 +7642,8 @@ function PackingScreen({ onTab, data, setData }) {
                       onChange={e => renameCategory(cat.id, e.target.value)}
                       placeholder="category name"
                       style={{ flex: 1, minWidth: 0, background: '#0f0f18', border: '1px solid var(--border)',
-                               borderRadius: 6, padding: '4px 8px', color: 'var(--text)',
-                               fontFamily: 'var(--font)', fontSize: 14 }}
+                               borderRadius: 6, padding: '7px 9px', color: 'var(--text)',
+                               fontFamily: 'var(--font)', fontSize: 18 }}
                     />
                     <span onClick={() => moveCategory(ci, -1)} style={miniBtn}>▲</span>
                     <span onClick={() => moveCategory(ci, 1)} style={miniBtn}>▼</span>
@@ -7669,7 +7677,7 @@ function PackingScreen({ onTab, data, setData }) {
                   always reachable while editing. */}
               {!hideRows && items.map((it, ii) => (
                 <div key={it.id} className={`check-row${!editMode && it.packed ? ' crossed' : ''}`}
-                     style={{ paddingTop: 8, paddingBottom: 8, gap: 8 }}>
+                     style={{ gap: 10 }}>
                   {editMode ? (
                     <>
                       <input
@@ -7677,8 +7685,8 @@ function PackingScreen({ onTab, data, setData }) {
                         onChange={e => renameItem(cat.id, it.id, e.target.value)}
                         placeholder="item"
                         style={{ flex: 1, minWidth: 0, background: '#0f0f18', border: '1px solid var(--border)',
-                                 borderRadius: 6, padding: '6px 8px', color: 'var(--text)',
-                                 fontFamily: 'var(--font)', fontSize: 15 }}
+                                 borderRadius: 6, padding: '9px 10px', color: 'var(--text)',
+                                 fontFamily: 'var(--font)', fontSize: 17 }}
                       />
                       <span onClick={() => moveItem(cat.id, ii, -1)} style={miniBtn}>▲</span>
                       <span onClick={() => moveItem(cat.id, ii, 1)} style={miniBtn}>▼</span>
