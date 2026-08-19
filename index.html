@@ -1121,7 +1121,7 @@ window.AB_FB = {
 </script>
 
 <script type="text/babel" data-presets="react">
-const { useState, useCallback, useEffect, useRef } = React;
+const { useState, useCallback, useEffect, useLayoutEffect, useRef } = React;
 
 /* ═══════════════════════════════════════════
    ⚙ EMBED YOUR CLAUDE API KEY HERE
@@ -5520,10 +5520,22 @@ const RECIPE_FILTER_TAGS = [
   'pasta','sheet-pan','one-pot','slow-cooker','instant-pot','kid-friendly',
 ];
 
-function RecipesScreen({ onTab, onRecipeDetail, onAddRecipe, recipeDB }) {
-  const [activeFilter, setActiveFilter] = useState('all');
-  const [effortFilter, setEffortFilter] = useState('any');
-  const [query, setQuery] = useState('');
+function RecipesScreen({ onTab, onRecipeDetail, onAddRecipe, recipeDB, view, setView, scrollRef }) {
+  /* Filters, search and scroll live in App, not here. Opening a recipe swaps
+     this whole screen out, so anything held locally is gone by the time you
+     press back — you'd return to an unfiltered list at the top, having lost
+     your place. Keeping them above this component preserves the browsing
+     context across that round trip (and across tab switches). */
+  const { activeFilter, effortFilter, query } = view;
+  const setActiveFilter = (v) => setView(p => ({ ...p, activeFilter: v }));
+  const setEffortFilter = (v) => setView(p => ({ ...p, effortFilter: v }));
+  const setQuery = (v) => setView(p => ({ ...p, query: v }));
+
+  const paneRef = useRef(null);
+  // Restore before paint so the list never flashes at the top first.
+  useLayoutEffect(() => {
+    if (paneRef.current) paneRef.current.scrollTop = scrollRef.current || 0;
+  }, []);
 
   let list = recipeDB;
   if (activeFilter !== 'all') list = list.filter(r => (r.tags || []).includes(activeFilter));
@@ -5578,7 +5590,11 @@ function RecipesScreen({ onTab, onRecipeDetail, onAddRecipe, recipeDB }) {
         ))}
       </HScroll>
 
-      <div className="pane">
+      <div
+        className="pane"
+        ref={paneRef}
+        onScroll={(e) => { scrollRef.current = e.currentTarget.scrollTop; }}
+      >
         {list.length === 0 && (
           <div style={{ padding:'24px 8px', textAlign:'center', color:'var(--text-dimmer)', fontSize:16 }}>
             No recipes match these filters.
@@ -7778,6 +7794,9 @@ function App() {
   const [packing, setPacking] = usePersistedState('ab.packing.v2', PACKING_SEED);
   const apiKey = EMBEDDED_API_KEY || persistedKey;
   const [showSettings, setShowSettings] = useState(false);
+  // Recipes-tab browsing context, kept here so it outlives the screen itself.
+  const [recipesView, setRecipesView] = useState({ activeFilter: 'all', effortFilter: 'any', query: '' });
+  const recipesScrollRef = useRef(0);
 
   // Reset checked-off grocery items every Friday (local 00:00)
   useEffect(() => {
@@ -7953,6 +7972,9 @@ function App() {
         onRecipeDetail={handleRecipeDetail}
         onAddRecipe={handleAddRecipe}
         recipeDB={recipeDB}
+        view={recipesView}
+        setView={setRecipesView}
+        scrollRef={recipesScrollRef}
       />;
       case 4: return <AutoPlanScreen
         onTab={handleTab}
