@@ -4146,7 +4146,7 @@ function RecipePeekSheet({ recipe, onClose }) {
                 <span style={{ color: 'var(--purple-bg)', minWidth: 18 }}>•</span>
                 {parsed && parsed.q ? (
                   <>
-                    <span style={{ color: 'var(--purple-light)', minWidth: 60, fontSize: 17 }}>{parsed.q}</span>
+                    <span style={{ color: 'var(--purple-light)', minWidth: 72, flexShrink: 0 }}>{parsed.q}</span>
                     <span style={{ color: '#bbb', flex: 1 }}>{ing}</span>
                   </>
                 ) : (
@@ -6416,7 +6416,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                     )}
                     {parsed && parsed.q ? (
                       <>
-                        <span style={{ color:'var(--purple-light)', minWidth:60, fontSize:15 }}>{parsed.q}</span>
+                        <span style={{ color:'var(--purple-light)', minWidth:88, flexShrink:0 }}>{parsed.q}</span>
                         <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
                       </>
                     ) : (
