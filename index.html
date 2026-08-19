@@ -3994,6 +3994,60 @@ function findItemIndex(list, key) {
   return (list || []).findIndex(it => itemKeys(it).includes(key));
 }
 
+/* ── "either/or" ingredients ──
+   Recipes routinely offer a choice ("spinach or kale"). Stored as one string
+   it becomes one unshoppable grocery item, so it's split into real options
+   the user can pick between. */
+
+// Words that describe a form of something rather than name it. When one of
+// these stands alone as an option it's really sharing the last option's noun:
+// "white or brown rice" means white RICE or brown RICE, not "white".
+const ALT_MODIFIERS = new Set([
+  'fresh','frozen','dried','canned','jarred','raw','cooked','ground','whole',
+  'white','brown','red','green','yellow','black','light','dark','sweet',
+  'low-fat','nonfat','skim','unsalted','salted','unsweetened','plain',
+]);
+
+function parseAlternatives(name) {
+  const s = String(name || '').trim();
+  if (!/\s+or\s+/i.test(s)) return null;
+
+  let parts;
+  if (/,\s*or\s+/i.test(s)) {
+    // "brown rice, quinoa, or cauliflower rice" — comma list closed by "or".
+    const m = s.split(/,\s*or\s+/i);
+    parts = m[0].split(/\s*,\s*/).concat(m.slice(1));
+  } else {
+    parts = s.split(/\s+or\s+/i);
+    // A comma inside a plain "a or b" is prep text, not another option.
+    if (parts.some(p => p.includes(','))) return null;
+  }
+
+  parts = parts.map(p => p.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 4) return null;
+  if (parts.some(p => p.split(/\s+/).length > 4)) return null;  // too wordy to be a clean choice
+
+  // Give bare descriptors the trailing option's noun.
+  // Strip only ONE leading descriptor. "frozen green beans" shares "green
+  // beans" with its sibling, not "beans" — green is part of the vegetable's
+  // name here, not the form it comes in.
+  const lastWords = parts[parts.length - 1].split(/\s+/);
+  const head = (lastWords.length > 1 && ALT_MODIFIERS.has(lastWords[0].toLowerCase()))
+    ? lastWords.slice(1) : lastWords;
+  const headNoun = head.join(' ');
+
+  return parts.map((p, i) => {
+    if (i === parts.length - 1) return p;
+    const w = p.split(/\s+/);
+    const bareModifier = w.length === 1 && ALT_MODIFIERS.has(w[0].toLowerCase());
+    return (bareModifier && headNoun && headNoun.toLowerCase() !== p.toLowerCase())
+      ? `${p} ${headNoun}` : p;
+  });
+}
+
+// Stable identity for one choice, independent of the order it was written in.
+const altGroupKey = (opts) => opts.map(o => o.toLowerCase().trim()).sort().join('|');
+
 // Which name to DISPLAY once two entries merge. Prefers the plainer name
 // ("lemon" over "lemon wedge"), then matches plurality to the new total
 // (3 → "carrots", 1 → "carrot").
@@ -6016,8 +6070,13 @@ function AddToCalendarSheet({ recipe, weekMap, setWeekMap, onClose, onDone }) {
 /* ═══════════════════════════════════════════
    SCREEN: RECIPE DETAIL
 ═══════════════════════════════════════════ */
-function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB, groceryList, setGroceryList, pantryStaples }) {
-  const r = recipe || (recipeDB && recipeDB[0]) || {};
+function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB, groceryList, setGroceryList, pantryStaples, altPicks, setAltPicks }) {
+  /* Always read the live row out of the library. `recipe` is a snapshot taken
+     when the row was tapped, and edits here write to recipeDB — rendering the
+     snapshot meant a save appeared to revert instantly, because the screen was
+     still showing the pre-edit copy. The write had actually succeeded. */
+  const liveRecipe = (recipe && recipeDB) ? recipeDB.find(x => x.id === recipe.id) : null;
+  const r = liveRecipe || recipe || (recipeDB && recipeDB[0]) || {};
   const [showCal, setShowCal] = useState(false);
   const [toast, setToast] = useState('');
   const [confirmDel, setConfirmDel] = useState(false);
@@ -6051,14 +6110,19 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   // Adds merge by name: if the same item is already on the list from another
   // recipe, the qty + src segments are combined. Removing only strips THIS
   // recipe's contribution; if other recipes also added the item, they keep it.
-  const toggleIng = (i) => {
+  const toggleIng = (i, opts = {}) => {
     if (!setGroceryList) return;
     const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
     const parsed = raw ? parseItem(raw) : { q: '', n: ingredients[i] };
-    const itemName = (parsed.n || ingredients[i] || '').trim();
+    // opts.name lets the alternatives picker put a chosen option on the list
+    // instead of the row's literal text; opts.force skips the toggle so a pick
+    // can remove the old choice and add the new one in one go.
+    const itemName = (opts.name || parsed.n || ingredients[i] || '').trim();
     if (!itemName) return;
     const key = groceryKey(itemName);
-    const onList = groceryNames.has(key);
+    const onList = opts.force === 'add' ? false
+                 : opts.force === 'remove' ? true
+                 : groceryNames.has(key);
 
     if (onList) {
       setGroceryList(prev => {
@@ -6077,7 +6141,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
         }
         return next;
       });
-      setToast('Removed: ' + itemName);
+      if (!opts.silent) setToast('Removed: ' + itemName);
     } else {
       setGroceryList(prev => {
         const next = [...prev];
@@ -6095,9 +6159,33 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
         }
         return next;
       });
-      setToast('Added: ' + itemName);
+      if (!opts.silent) setToast('Added: ' + itemName);
     }
     setTimeout(() => setToast(''), 1500);
+  };
+
+  /* Resolve which option is active for a choice: an explicit pick in THIS
+     recipe wins, otherwise the default set the last time you picked anywhere,
+     otherwise nothing is chosen yet. */
+  const picks = altPicks || { global: {}, byRecipe: {} };
+  const pickFor = (groupKey) => {
+    const mine = (picks.byRecipe || {})[r.id];
+    return (mine && mine[groupKey]) || (picks.global || {})[groupKey] || null;
+  };
+  const choose = (i, options, chosen) => {
+    const gk = altGroupKey(options);
+    const prev = pickFor(gk);
+    if (prev === chosen) return;
+    if (prev) toggleIng(i, { name: prev, force: 'remove', silent: true });
+    toggleIng(i, { name: chosen, force: 'add', silent: true });
+    if (setAltPicks) setAltPicks(p => ({
+      // Picking sets the default everywhere AND pins it for this recipe, so a
+      // different choice here later doesn't get overwritten by the default.
+      global: { ...(p.global || {}), [gk]: chosen },
+      byRecipe: { ...(p.byRecipe || {}), [r.id]: { ...((p.byRecipe || {})[r.id] || {}), [gk]: chosen } },
+    }));
+    setToast('Using ' + chosen);
+    setTimeout(() => setToast(''), 1800);
   };
 
   // One-tap "everything for this recipe onto the grocery list". Skips pantry
@@ -6299,7 +6387,11 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
               )}
               <span style={{ fontSize:17, color:'var(--text-dimmer)' }}>used {r.used || 0}×</span>
               {r.url && (
-                <a href={r.url} target="_blank" rel="noreferrer" style={{ fontSize:15, color:'var(--purple)', borderBottom:'1px dashed var(--purple-bg)', textDecoration:'none' }}>🔗 source</a>
+                <a href={r.url} target="_blank" rel="noreferrer"
+                   style={{ fontSize:19, color:'var(--purple-light)', textDecoration:'none',
+                            border:'1.5px solid var(--purple-bg)', borderRadius:8,
+                            padding:'6px 14px', display:'inline-flex', alignItems:'center', gap:6,
+                            background:'rgba(124,58,237,0.12)', whiteSpace:'nowrap' }}>🔗 View source</a>
               )}
             </div>
 
@@ -6400,13 +6492,19 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                 const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
                 const parsed = raw ? parseItem(raw) : null;
                 const groceryItem = groceryByName[(ing || '').toLowerCase()];
-                const onList = !!groceryItem;
-                const isBought = onList && groceryItem.done;
+                // An "X or Y" ingredient becomes a set of real options to pick
+                // between, rather than one unshoppable phrase.
+                const alts = parseAlternatives(ing);
+                const gk = alts ? altGroupKey(alts) : null;
+                const chosen = alts ? pickFor(gk) : null;
+                const chosenItem = chosen ? groceryByName[groceryKey(chosen)] : null;
+                const onList = alts ? !!chosenItem : !!groceryItem;
+                const isBought = alts ? (!!chosenItem && chosenItem.done) : (onList && groceryItem.done);
                 const tappable = !!setGroceryList;
                 return (
                   <div
                     key={i}
-                    onClick={tappable ? () => toggleIng(i) : null}
+                    onClick={(tappable && !alts) ? () => toggleIng(i) : null}
                     style={{
                       display:'flex', gap:10, padding:'10px 6px',
                       borderBottom:'1px dashed var(--border-dim)',
@@ -6430,11 +6528,31 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                     ) : (
                       <span style={{ color:'var(--purple-bg)', minWidth:18 }}>•</span>
                     )}
-                    {parsed && parsed.q ? (
-                      <>
-                        <span style={{ color:'var(--purple-light)', minWidth:88, flexShrink:0 }}>{parsed.q}</span>
-                        <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
-                      </>
+                    {parsed && parsed.q && (
+                      <span style={{ color:'var(--purple-light)', minWidth:88, flexShrink:0 }}>{parsed.q}</span>
+                    )}
+                    {alts ? (
+                      <span style={{ flex:1, display:'flex', flexWrap:'wrap', gap:8 }}>
+                        {alts.map(opt => {
+                          const isPicked = chosen === opt;
+                          return (
+                            <span
+                              key={opt}
+                              onClick={(e) => { e.stopPropagation(); if (tappable) choose(i, alts, opt); }}
+                              style={{
+                                fontSize:20, padding:'3px 12px', borderRadius:8,
+                                cursor: tappable ? 'pointer' : 'default',
+                                border:`1.5px ${isPicked ? 'solid var(--purple)' : 'dashed var(--border)'}`,
+                                background: isPicked ? 'rgba(124,58,237,0.16)' : 'transparent',
+                                color: isPicked ? '#fff' : '#bbb',
+                                opacity: (chosen && !isPicked) ? 0.45 : 1,
+                              }}
+                            >{opt}</span>
+                          );
+                        })}
+                      </span>
+                    ) : parsed && parsed.q ? (
+                      <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
                     ) : (
                       <span style={{ color:'#bbb', flex:1 }}>{ing}</span>
                     )}
@@ -7791,6 +7909,10 @@ function App() {
   // pruned items after they were already on screen.
   const [catCache, setCatCache] = usePersistedState('ab.catCache', {});
   const [persistedKey, setPersistedKey] = usePersistedState('ab.apiKey', '');
+  /* Which option was chosen for each either/or ingredient. `global` is the
+     default once you've picked anywhere; `byRecipe` overrides it for a recipe
+     you've deliberately set differently. */
+  const [altPicks, setAltPicks] = usePersistedState('ab.altPicks.v1', { global: {}, byRecipe: {} });
   const [packing, setPacking] = usePersistedState('ab.packing.v2', PACKING_SEED);
   const apiKey = EMBEDDED_API_KEY || persistedKey;
   const [showSettings, setShowSettings] = useState(false);
@@ -7924,6 +8046,8 @@ function App() {
         groceryList={groceryList}
         setGroceryList={setGroceryList}
         pantryStaples={pantryStaples}
+        altPicks={altPicks}
+        setAltPicks={setAltPicks}
       />;
     }
     if (subscreen === 'add-recipe') {
