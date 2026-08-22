@@ -5735,6 +5735,30 @@ function AddRecipeScreen({ onBack, onURL, onDescribe, apiKey, onTab }) {
 function RecipePreviewCard({ data, onChange }) {
   if (!data) return null;
   const tags = data.tags || [];
+  const editable = !!onChange;
+
+  /* Edit the lines that carry the measurement, not the bare names — the name
+     is derived from the line so the two can't drift apart. */
+  const names = data.ingredients || [];
+  const lines = (Array.isArray(data.ingredientsWithQty) && data.ingredientsWithQty.length === names.length)
+    ? data.ingredientsWithQty
+    : names.slice();
+  const steps = data.steps || [];
+
+  const commitLines = (next) => onChange({
+    ...data,
+    ingredientsWithQty: next,
+    ingredients: next.map(s => (parseItem(s).n || s).trim()),
+  });
+  const setLine = (i, val) => commitLines(lines.map((l, j) => j === i ? val : l));
+  const removeLine = (i) => commitLines(lines.filter((_, j) => j !== i));
+  const addLine = () => commitLines([...lines, '']);
+
+  const commitSteps = (next) => onChange({ ...data, steps: next });
+  const setStep = (i, val) => commitSteps(steps.map((x, j) => j === i ? val : x));
+  const removeStep = (i) => commitSteps(steps.filter((_, j) => j !== i));
+  const addStep = () => commitSteps([...steps, '']);
+
   const isSide = tags.includes('sides');
   const toggleSide = () => {
     if (!onChange) return;
@@ -5781,17 +5805,66 @@ function RecipePreviewCard({ data, onChange }) {
           <span>Side dish (skip from auto-plan)</span>
         </div>
       )}
-      <div className="section-label">Ingredients ({data.ingredients.length})</div>
-      <div style={{ fontSize:15, color:'#aaa', lineHeight:1.5, marginBottom:8 }}>
-        {data.ingredients.join(', ')}
-      </div>
-      <div className="section-label">Steps ({data.steps.length})</div>
-      {data.steps.map((s, i) => (
-        <div key={i} style={{ fontSize:15, color:'#aaa', padding:'3px 0', lineHeight:1.5, display:'flex', gap:6 }}>
-          <span style={{ color:'var(--purple-bg)', minWidth:18 }}>{i+1}.</span>
-          <span style={{ flex:1 }}>{s}</span>
+      {/* Ingredients and steps are editable here, before the recipe is saved.
+          This is the one moment the source page and the parsed result can be
+          compared, and an import that dropped a word or mangled a measurement
+          is far cheaper to correct now than after it has seeded a grocery
+          list. Lines carry their measurement — the old preview showed bare
+          names, so a wrong quantity was invisible until shopping. */}
+      <div className="section-label">Ingredients ({lines.length})</div>
+      {lines.map((line, i) => (
+        <div key={i} style={{ display:'flex', gap:6, alignItems:'center', marginBottom:5 }}>
+          <input
+            value={line}
+            onChange={(e) => editable && setLine(i, e.target.value)}
+            readOnly={!editable}
+            placeholder="2 cups flour"
+            style={{
+              flex:1, minWidth:0, background:'#0f0f18', border:'1px solid var(--border)',
+              borderRadius:6, padding:'8px 10px', color:'var(--text)',
+              fontFamily:'var(--font-input)', fontSize:17,
+            }}
+          />
+          {editable && (
+            <span onClick={() => removeLine(i)} title="remove"
+                  style={{ color:'#e06c6c', cursor:'pointer', padding:'4px 8px', fontSize:19, flexShrink:0 }}>×</span>
+          )}
         </div>
       ))}
+      {editable && (
+        <div onClick={addLine}
+             style={{ margin:'2px 0 12px', padding:'7px 10px', borderRadius:8, cursor:'pointer',
+                      border:'1.5px dashed var(--border)', background:'#0f0f18',
+                      color:'var(--text-dimmer)', fontSize:15, textAlign:'center' }}>+ Add ingredient</div>
+      )}
+
+      <div className="section-label">Steps ({steps.length})</div>
+      {steps.map((st, i) => (
+        <div key={i} style={{ display:'flex', gap:6, alignItems:'flex-start', marginBottom:5 }}>
+          <span style={{ color:'var(--purple-bg)', minWidth:20, fontSize:17, paddingTop:9 }}>{i+1}.</span>
+          <textarea
+            value={st}
+            onChange={(e) => editable && setStep(i, e.target.value)}
+            readOnly={!editable}
+            rows={Math.max(2, Math.ceil((st || '').length / 38))}
+            style={{
+              flex:1, minWidth:0, background:'#0f0f18', border:'1px solid var(--border)',
+              borderRadius:6, padding:'8px 10px', color:'var(--text)', resize:'vertical',
+              fontFamily:'var(--font-input)', fontSize:17, lineHeight:1.45,
+            }}
+          />
+          {editable && (
+            <span onClick={() => removeStep(i)} title="remove"
+                  style={{ color:'#e06c6c', cursor:'pointer', padding:'4px 8px', fontSize:19, flexShrink:0 }}>×</span>
+          )}
+        </div>
+      ))}
+      {editable && (
+        <div onClick={addStep}
+             style={{ marginTop:2, padding:'7px 10px', borderRadius:8, cursor:'pointer',
+                      border:'1.5px dashed var(--border)', background:'#0f0f18',
+                      color:'var(--text-dimmer)', fontSize:15, textAlign:'center' }}>+ Add step</div>
+      )}
     </div>
   );
 }
@@ -8015,6 +8088,21 @@ function App() {
 
   const handleSaveNewRecipe = (data) => {
     if (!data) return;
+    /* Drop blank rows left behind in the import preview. Ingredient lines and
+       their derived names are kept index-aligned — the picker and the grocery
+       merge both read them in parallel, so dropping one without the other
+       would pair a measurement with the wrong ingredient. */
+    const rawLines = Array.isArray(data.ingredientsWithQty) ? data.ingredientsWithQty : [];
+    const rawNames = Array.isArray(data.ingredients) ? data.ingredients : [];
+    const keep = rawLines.length === rawNames.length
+      ? rawLines.map((l, i) => ({ l, n: rawNames[i] })).filter(x => (x.l || '').trim())
+      : rawNames.filter(n => (n || '').trim()).map(n => ({ l: n, n }));
+    data = {
+      ...data,
+      ingredientsWithQty: keep.map(x => (x.l || '').trim()),
+      ingredients: keep.map(x => (x.n || '').trim()),
+      steps: (data.steps || []).map(x => (x || '').trim()).filter(Boolean),
+    };
     const nextId = recipeDBRaw.reduce((m, r) => Math.max(m, r.id || 0), 0) + 1;
     const minutes = typeof data.estMinutes === 'number' && data.estMinutes > 0
       ? data.estMinutes
