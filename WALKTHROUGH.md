@@ -152,17 +152,28 @@ lives. Sub-sections:
   salt" and "sea salt" both collapse to "salt").
 
 #### 5b. Image picker (lines ~1005–1031)
-Recipe thumbnails. Tries the original og:image first (captured during
-URL import), then Loremflickr (real Flickr photos tagged with the
-recipe's keywords), then Pollinations (AI-generated as last resort),
+Recipe thumbnails. Tries a real photo first — the og:image captured
+during URL import, or a URL you pasted in yourself via the 📷 button
+on a recipe — then a photo generated from the dish (Pollinations),
 then a static emoji.
+
+There used to be a tag-matching stock-photo service in the middle of
+that chain. It was removed: those services return an unrelated photo
+from their general pool when nothing matches the tags, and they return
+it with a `200`, so the error-driven fallback never fired and the wrong
+picture stuck.
 
 #### 5c. Effort + helpers (lines ~1032–1142)
 - `effortColor` / `effortLabel`: how "Light / Medium / Heavy"
   complexity is shown visually (green / amber / red).
 - `recipePhotoSources`: orders the image candidates above.
-- `recipeKeywords` / `recipeImageKeywords`: pulls search terms from
-  the recipe name (or, for descriptions, from the user's typed text).
+- `recipePhotoSubject`: what the photo should show. Claude writes an
+  `imagePrompt` for every recipe it ingests, describing the finished
+  dish; for recipes saved before that existed, this falls back to the
+  name plus `servingStyleFor` (a sheet-pan dinner is photographed on
+  the sheet pan, a soup in a bowl).
+- `recipeSeed`: keeps a recipe's photo stable between loads. A recipe's
+  `photoSeed` overrides it — that's how "try another photo" works.
 
 #### 5d. LLM helpers + autoplan picker (lines ~1143–2250)
 The biggest sub-section and the most interesting. Three parts:

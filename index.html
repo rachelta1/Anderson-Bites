@@ -1419,64 +1419,63 @@ function effortColor(r) {
   return lv === 'low' ? '#7ed3a0' : lv === 'high' ? '#e8a070' : '#a78bfa';
 }
 // Stable hash → seed so the same recipe always gets the same image.
+// photoSeed overrides it, which is how "try another photo" works: bump the
+// stored number and the same recipe renders a different shot.
 function recipeSeed(r) {
+  if (r && typeof r.photoSeed === 'number') return Math.abs(r.photoSeed) || 1;
   const s = (r && (r.name || r.url) || '').toLowerCase();
   let h = 0; for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return Math.abs(h) || 1;
 }
 
-// Strip stop words and non-food words from a recipe name to get search keywords.
-const RECIPE_STOP = new Set([
-  'easy','quick','best','simple','homemade','recipe','recipes','the','a','an',
-  'of','in','on','with','and','for','to','your','my','our','sheet','pan','pot',
-  'one','two','three','four','five','minute','minutes','min','style','classic',
-  'creamy','crispy','crunchy','tasty','delicious','perfect','ultimate','favorite',
-]);
-function recipeKeywords(name) {
-  return (name || 'food').toLowerCase()
-    .split(/[^a-z]+/)
-    .filter(w => w.length > 2 && !RECIPE_STOP.has(w))
-    .slice(0, 3);
+/* How the dish is plated, inferred from tags, so a soup is photographed in a
+   bowl and a sheet-pan dinner on its tray. Only matters for recipes with no
+   imagePrompt of their own — everything Claude writes from now on says this
+   itself. */
+function servingStyleFor(r) {
+  const t = (r && r.tags) || [];
+  if (t.includes('sheet-pan')) return 'served on a sheet pan';
+  if (t.includes('slow-cooker') || t.includes('instant-pot')) return 'served in the pot';
+  if (t.includes('one-pot')) return 'served in a skillet';
+  if (t.includes('soup')) return 'served in a bowl';
+  if (t.includes('salad')) return 'served in a shallow bowl';
+  if (t.includes('pasta')) return 'served in a bowl';
+  if (t.includes('dessert') || t.includes('snack')) return 'on a cooling rack';
+  return 'served on a plate';
 }
 
-// When a recipe was generated from a free-form user description, the LLM
-// may pick a name that omits the actual main ingredient (e.g. user types
-// "homemade chicken curry" and the LLM names it "Curry Bowl" → image
-// search keys on "curry", "bowl" and finds something off). Using the
-// description as a hint pulls richer keywords from what the user
-// actually said.
-function recipeImageKeywords(r) {
-  const hint = r && r.searchHint;
-  if (hint && typeof hint === 'string' && hint.trim()) {
-    const kws = (hint.toLowerCase()
-      .split(/[^a-z]+/)
-      .filter(w => w.length > 2 && !RECIPE_STOP.has(w)));
-    if (kws.length) return kws.slice(0, 4);
-  }
-  return recipeKeywords(r && r.name);
+/* The subject line handed to the image generator. Claude writes a purpose-made
+   imagePrompt for every recipe it produces now; the rest is for recipes saved
+   before that existed. searchHint (the user's raw description) is deliberately
+   NOT used as the subject — it is often a rambling paragraph about method, and
+   a picture generated from "simmer for 2 hours, pull the meat" is a mess. The
+   dish name plus how it is served is the reliable signal. */
+function recipePhotoSubject(r) {
+  const written = r && typeof r.imagePrompt === 'string' && r.imagePrompt.trim();
+  if (written) return written;
+  const name = (r && r.name) || 'home cooked meal';
+  return `${name}, ${servingStyleFor(r)}`;
 }
 
-// Ordered list of image sources to try. Real photos first, AI as a fallback,
-// emoji as the very last resort. RecipeThumb cycles through them on <img> error.
+/* Ordered list of image sources to try; the emoji is the last resort, and
+   RecipeThumb cycles through on <img> error.
+
+   Note there is exactly ONE remote source. A tag-matching stock service used
+   to sit in front of the generated image, but those return an unrelated photo
+   from their general pool when nothing matches the tags — and they return it
+   with a 200, so the error-driven fallback below never fired and the wrong
+   picture stuck. An image generated from the dish itself is always about the
+   dish. */
 function recipePhotoSources(r, w, h) {
   const W = w || 600, H = h || 400;
   const seed = recipeSeed(r);
-  const name = (r && r.name) || 'home cooked meal';
-  // Prefer searchHint-derived keywords (set when user described the recipe)
-  // since the LLM-chosen name sometimes omits the actual main ingredient.
-  const kws = recipeImageKeywords(r);
-  const tags = ['food', ...kws].join(',');
-  // The Pollinations prompt also benefits from the original description,
-  // since "professional photo of <user's chicken curry description>" beats
-  // "professional photo of <LLM-chosen short name>".
-  const aiSubject = (r && r.searchHint && r.searchHint.trim()) || name;
   const out = [];
-  // og:image captured during URL import — always preferred when present
+  // A real photo of the real dish beats a generated one: og:image captured
+  // during URL import, or a URL the user pasted in themselves.
   if (r && r.image) out.push(r.image);
-  // Loremflickr: real Flickr photos tagged "food" + recipe keywords. Free, no key.
-  out.push(`https://loremflickr.com/${W}/${H}/${encodeURIComponent(tags)}?lock=${seed}`);
-  // Pollinations: AI-generated food photo. Last-resort image before the emoji.
-  const prompt = encodeURIComponent(`professional food photography, overhead shot, ${aiSubject}, on a plate`);
+  const prompt = encodeURIComponent(
+    `professional food photography of ${recipePhotoSubject(r)}, overhead shot, natural light, appetizing, no text, no people`
+  );
   out.push(`https://image.pollinations.ai/prompt/${prompt}?width=${W}&height=${H}&nologo=true&seed=${seed}`);
   return out;
 }
@@ -1529,7 +1528,8 @@ const RECIPE_SCHEMA_PROMPT = `You ingest recipes for a meal-planning app. Return
   "complexity": "Light" | "Medium" | "Heavy",
   "dishCount": number,
   "tags": string[],
-  "emoji": string
+  "emoji": string,
+  "imagePrompt": string
 }
 
 Rules — apply consistently:
@@ -1571,6 +1571,13 @@ TAGS — only from this list: breakfast, lunch, dinner, snack, dessert, soup, sa
 - kid-friendly for muffins, pancakes, granola bars, mac and cheese, meatballs, sloppy joe, baked ziti, baked spaghetti, chicken parm, tacos, sweet potato fries, chocolate chip / banana / carrot cake.
 
 EMOJI: one cooking-related emoji that best represents the dish (e.g. 🍝 🍕 🥘 🍲 🥗 🍣 🌮 🍔 🍳 🥞 🧇 🥯 🥖 🍪 🥧 🌯 🍱 🍤 🍜 🥟 🍛 🥪 🌭 🥙 🍖 🍗 🥩 🐟 🦐).
+
+IMAGE PROMPT: 8-20 words describing the FINISHED dish as it would look in a photograph. This is fed to an image generator, so describe only what is VISIBLE when the food is ready to eat:
+- the dish by name, its main components, and their colour and texture ("golden roasted", "charred", "glossy sauce", "melted cheese")
+- how it is served — the vessel matters: on a sheet pan, in a cast iron skillet, in a bowl, sliced on a wooden board, on a plate. Match the cooking method: a sheet-pan dinner belongs ON THE SHEET PAN, a soup in a bowl, a casserole in its baking dish.
+- a visible garnish if the recipe has one (herbs, lemon wedges, sesame seeds)
+Do NOT include: raw ingredients that disappear into the dish, quantities, cooking steps or equipment not in the shot, people, hands, text, logos, or brand names. Write it as a plain noun phrase, not a sentence, and never mention photography settings — those get added separately.
+Example for a sheet-pan chicken shawarma: "sheet pan chicken shawarma, charred spiced thighs with red onion, lemon wedges and parsley"
 
 Output JSON only.`;
 
@@ -1811,6 +1818,10 @@ function normalizeRecipeFromLlm(parsed, fallback) {
     dishCount: typeof parsed.dishCount === 'number' ? parsed.dishCount : 2,
     tags: Array.isArray(parsed.tags) ? parsed.tags : ['dinner'],
     emoji: parsed.emoji || '🍽️',
+    // What the finished dish looks like, in Claude's words — this is what the
+    // photo is generated from. Capped because the model occasionally returns a
+    // paragraph, and a long prompt dilutes the subject.
+    imagePrompt: typeof parsed.imagePrompt === 'string' ? parsed.imagePrompt.trim().slice(0, 200) : '',
   };
   out.estMinutes = Math.max(out.activeMinutes, out.passiveMinutes) + 5;
   // ensure 'fast' tag matches rule
@@ -3413,6 +3424,70 @@ function withTaskIcon(text) {
     if (re.test(s)) return `${icon} ${s}`;
   }
   return `📝 ${s}`;
+}
+
+/* Change the photo on a recipe. Three ways out: generate a different one,
+   point at a real photo on the web, or go back to the default. Needed because
+   the generated shot is a guess — a good one, but the cook is the one who
+   knows whether it looks like the dish they had in mind. */
+function RecipePhotoSheet({ recipe, onApply, onClose }) {
+  const [url, setUrl] = useState((recipe && recipe.image) || '');
+  const preview = { ...recipe, image: url.trim() || undefined };
+  const shuffle = () => {
+    // A fresh seed and no pasted URL, so the generated photo is what shows.
+    onApply({ image: '', photoSeed: Math.floor(Math.random() * 1e9) });
+  };
+  const useUrl = () => {
+    const u = url.trim();
+    if (!u) return;
+    onApply({ image: u });
+    onClose();
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()}>
+        <div className="modal-grabber" />
+        <div className="modal-header">
+          <div className="modal-title">Recipe photo</div>
+          <span className="modal-close" onClick={onClose}>×</span>
+        </div>
+
+        <div style={{ display:'flex', justifyContent:'center', marginBottom:12 }}>
+          <RecipeThumb recipe={preview} size={128} />
+        </div>
+
+        <div className="gen-btn" style={{ marginBottom:12 }} onClick={shuffle}>🎲 Try another photo</div>
+
+        <div style={{ fontSize:15, color:'var(--text-dimmer)', marginBottom:6 }}>
+          Or paste a link to a photo you like:
+        </div>
+        <input
+          className="task-input"
+          type="url"
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') useUrl(); }}
+          placeholder="https://…/photo.jpg"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+        />
+
+        <div style={{ display:'flex', gap:8, padding:'14px 0 4px' }}>
+          <div
+            className="gen-btn"
+            style={{ flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)' }}
+            onClick={() => { onApply({ image: '', photoSeed: null }); onClose(); }}
+          >Reset</div>
+          <div
+            className="gen-btn"
+            style={{ flex:2, opacity: url.trim() ? 1 : 0.5 }}
+            onClick={url.trim() ? useUrl : undefined}
+          >Use this photo</div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function TaskSheet({ initial, onSave, onClose }) {
@@ -6239,6 +6314,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const [notes, setNotes] = useState(r.notes || '');
   const [notesDirty, setNotesDirty] = useState(false);
   const [heroIdx, setHeroIdx] = useState(0);
+  const [photoSheet, setPhotoSheet] = useState(false);
   // Toggle between the full Ingredients view (hero + meta + tags + ingredients)
   // and a minimal Steps view (notes + steps only) for cooking.
   const [activeTab, setActiveTab] = useState('ingredients');
@@ -6410,6 +6486,16 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     onBack();
   };
 
+  // Photo changes write straight to the library, same as notes. Resetting
+  // heroIdx sends the hero back to the top of the source list, so a newly
+  // pasted URL is what gets tried first rather than staying on whatever
+  // fallback the previous photo had already stepped down to.
+  const applyPhoto = (patch) => {
+    if (!setRecipeDB || !r.id) return;
+    setRecipeDB(prev => prev.map(x => x.id === r.id ? { ...x, ...patch } : x));
+    setHeroIdx(0);
+  };
+
   const saveNotes = () => {
     if (!notesDirty || !setRecipeDB || !r.id) return;
     setRecipeDB(prev => prev.map(x => x.id === r.id ? { ...x, notes } : x));
@@ -6520,7 +6606,12 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                 style={{ fontSize:15, color:'#ddd', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #444', borderRadius:6, cursor:'pointer' }}
               >‹ back</span>
             </div>
-            <div style={{ position:'absolute', top:8, right:8 }}>
+            <div style={{ position:'absolute', top:8, right:8, display:'flex', gap:6 }}>
+              <span
+                onClick={() => setPhotoSheet(true)}
+                style={{ fontSize:15, color:'#ddd', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #444', borderRadius:6, cursor:'pointer' }}
+                title="Change photo"
+              >📷 photo</span>
               <span
                 onClick={() => setConfirmDel(true)}
                 style={{ fontSize:15, color:'#e29090', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #5a2030', borderRadius:6, cursor:'pointer' }}
@@ -6796,6 +6887,14 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
             setToast(msg);
             setTimeout(() => setToast(''), 3500);
           }}
+        />
+      )}
+
+      {photoSheet && (
+        <RecipePhotoSheet
+          recipe={r}
+          onApply={applyPhoto}
+          onClose={() => setPhotoSheet(false)}
         />
       )}
 
