@@ -1997,6 +1997,69 @@ function proteinTagOf(recipe) {
   return null;
 }
 
+/* Pasta is capped per week by default. Deliberately NOT done through
+   proteinTagOf: that returns the animal protein for a chicken pasta, so a
+   protein-keyed cap would miss most pasta dishes. "Dishes with pasta" means
+   the dish is pasta, whatever else is in it. */
+const PASTA_MAX_DEFAULT = 1;
+/* The tag is the primary signal, but it is not reliable on its own: a few
+   built-ins never got tagged, and imports inherit whatever tags the model
+   chose. The title is the backstop — a dish named for its pasta IS a pasta
+   dish. Deliberately name-only, not ingredient-scanning: minestrone with half
+   a cup of shell pasta and a braise served over noodles are not what "pasta
+   once a week" means. */
+const PASTA_NAME_RE = /\b(pasta|spaghetti|orzo|macaroni|mac and cheese|noodles?|penne|linguine|fettuccine|tagliatelle|lasagn[ae]|orecchiette|gnocchi|ravioli|tortellini|ziti|rigatoni|carbonara|bolognese|tetrazzini|alfredo)\b/i;
+const isPastaDish = (r) => !!r && (
+  (Array.isArray(r.tags) && r.tags.includes('pasta')) || PASTA_NAME_RE.test(r.name || '')
+);
+// The default gives way to anything the user actually asked for ("pasta twice
+// this week"), which parseProteinConstraints already understands.
+const pastaCapFrom = (caps) => (caps && caps.pasta !== undefined) ? caps.pasta : PASTA_MAX_DEFAULT;
+
+/* Every swap pass that runs AFTER enforcePastaCap keys off proteinTagOf, which
+   reports a chicken pasta as "chicken" — so on its own it will happily swap a
+   pasta dish back in and quietly breach the cap again. Each of those filters
+   asks this first. dayIdx is the slot being replaced: its own dinner does not
+   count against the cap, since it is on its way out. */
+function pastaCapBlocks(candidate, result, cap, dayIdx) {
+  if (typeof cap !== 'number' || !isPastaDish(candidate)) return false;
+  const others = result.filter((s, i) => i !== dayIdx && isPastaDish(s.dinner)).length;
+  return others >= cap;
+}
+
+/* Swap surplus pasta dinners out for non-pasta ones that still suit the day's
+   effort tier. Run BEFORE protein-cap enforcement so that pass can repair any
+   protein violation a swap here introduces. */
+function enforcePastaCap({ result, cap, candidates, usedThisRun, tierOf }) {
+  if (typeof cap !== 'number' || cap < 0) return;
+  const idx = [];
+  result.forEach((slot, i) => { if (isPastaDish(slot.dinner)) idx.push(i); });
+  let remaining = idx.length;
+  // Latest pasta night goes first; earlier picks more often reflect a specific
+  // request the user made for that weekday. One day with no viable swap must
+  // NOT abandon the rest — carry on to the next, or a single awkward day
+  // leaves the cap breached everywhere else too.
+  for (let k = idx.length - 1; k >= 0 && remaining > cap; k--) {
+    const dayIdx = idx[k];
+    const slot = result[dayIdx];
+    const tier = tierOf(slot);
+    const replacement = (candidates || []).find(r =>
+      r && !usedThisRun.has(r.name) && !isPastaDish(r) && tierAllowsComplexity(tier, r.complexity));
+    if (!replacement) {
+      console.warn(`[pickPlan] no non-pasta swap fits ${slot.dt} (tier ${tier}) — leaving it`);
+      continue;
+    }
+    if (slot.dinner && slot.dinner.name) usedThisRun.delete(slot.dinner.name);
+    usedThisRun.add(replacement.name);
+    result[dayIdx] = { ...slot, dinner: replacement };
+    remaining--;
+    console.log(`[pickPlan] swapped ${slot.dt} → ${replacement.name} to respect pasta cap ${cap}`);
+  }
+  if (remaining > cap) {
+    console.warn(`[pickPlan] pasta cap ${cap} still exceeded (${remaining}) — library lacks non-pasta options for those days`);
+  }
+}
+
 // Parse "I want ground beef" / "chicken sometime" / "shrimp" — any plain
 // mention of a protein word (without a "no/skip/avoid/never" prefix and
 // without a count modifier) is treated as a REQUEST: include at least one
@@ -2322,6 +2385,7 @@ async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, 
   // honor them in the first place; the post-fix is a safety net for the cases
   // where it doesn't.
   const proteinCaps = parseProteinConstraints(instructions);
+  const pastaCap = pastaCapFrom(proteinCaps);
   // Proteins the user MENTIONED (without "no/skip") = should appear at
   // least once each in the plan. Filtered to remove any tag also capped
   // at 0 (e.g. "no chicken" trumps a positive mention).
@@ -2338,6 +2402,9 @@ async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, 
     activeMinutes: r.activeMinutes ?? recipeMinutes(r),
     complexity: r.complexity || 'Medium',
     isFast: isFastRecipe(r),
+    // Stated outright rather than left to the tags: enforcement uses
+    // isPastaDish, so the model has to be judging the same thing it does.
+    isPasta: isPastaDish(r),
     used: r.used || 0,
   }));
 
@@ -2375,11 +2442,13 @@ For each day, return ONE dinner (by exact name from the library) and a list of t
     - tier === 'free' (no breakfast, no tasks): dinner MUST be complexity=Medium OR Heavy. NEVER Light. Free days are reserved for the more involved dishes.
 (7) spread the load: don't pile multiple effort sources on one day if other days are empty. If a user-requested specific dinner (e.g. "pasta one night") would land on a tier='breakfast' day, prefer to put it on a DIFFERENT day instead.
 (8) PROTEIN CAPS are HARD limits. The user prompt includes a PROTEIN_CAPS object listing maximum dinners per protein (e.g. {"chicken": 1} means AT MOST one chicken dinner across the entire plan; {"fish": 0} means zero fish dinners). NEVER exceed these caps. If the user says "chicken one night only" and the cap is 1, exactly zero or one of your picks may have the chicken tag (turkey counts as chicken). When choosing recipes, count the protein tags as you go and stop reaching for that protein once you hit the cap.
-(9) PROTEIN REQUIREMENTS are MINIMUMS the user explicitly asked for. The user prompt includes a PROTEIN_REQUIRED array listing protein tags that MUST each appear in AT LEAST ONE dinner across the plan if any matching recipe is available in the library. Example: if the user says "ground beef and chicken thursday", PROTEIN_REQUIRED would be ["beef", "chicken"] — at least one beef dinner AND at least one chicken dinner. Honor these BEFORE filling remaining slots with variety. If the library has zero recipes for a required protein, skip it (don't error). Required proteins still count toward their own PROTEIN_CAPS — but caps are usually generous when the user is actively asking for the protein.${rerollSeed > 1 ? `\n(10) THIS IS A RE-ROLL (attempt #${rerollSeed}). The user already saw plan(s) with these same constraints and wants DIFFERENT recipes this time. The DINNER LIBRARY below has already been filtered to remove recipes shown in earlier attempts — pick freely from it without trying to recreate a previous plan. Keep all hard constraints (1-9) intact. Within the candidate list, favor variety: don't gravitate to the same protein/cuisine cluster on every reroll.` : ''}
+(9) PROTEIN REQUIREMENTS are MINIMUMS the user explicitly asked for. The user prompt includes a PROTEIN_REQUIRED array listing protein tags that MUST each appear in AT LEAST ONE dinner across the plan if any matching recipe is available in the library. Example: if the user says "ground beef and chicken thursday", PROTEIN_REQUIRED would be ["beef", "chicken"] — at least one beef dinner AND at least one chicken dinner. Honor these BEFORE filling remaining slots with variety. If the library has zero recipes for a required protein, skip it (don't error). Required proteins still count toward their own PROTEIN_CAPS — but caps are usually generous when the user is actively asking for the protein.${rerollSeed > 1 ? `\n(11) THIS IS A RE-ROLL (attempt #${rerollSeed}). The user already saw plan(s) with these same constraints and wants DIFFERENT recipes this time. The DINNER LIBRARY below has already been filtered to remove recipes shown in earlier attempts — pick freely from it without trying to recreate a previous plan. Keep all hard constraints (1-10) intact. Within the candidate list, favor variety: don't gravitate to the same protein/cuisine cluster on every reroll.` : ''}
+
+(10) PASTA CAP is a HARD limit. The user prompt includes PASTA_MAX — the most pasta dinners the plan may contain. A dinner counts if its library entry has "isPasta": true. That includes dishes that also carry a protein tag: a chicken pasta counts. Default is one per week; respect the number given.
 
 Return ONLY JSON, no prose, no markdown.`;
 
-  const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
+  const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nPASTA_MAX (hard maximum — dinners whose library entry has "isPasta": true, including pasta dishes that also carry a protein tag):\n${pastaCap}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
 
   const text = await callClaude({ apiKey, system, user, thinking: NO_THINKING });
   const parsed = extractJson(text);
@@ -2535,6 +2604,11 @@ Return ONLY JSON, no prose, no markdown.`;
   // or when one protein dominates the candidate pool. We count dinners by
   // protein tag, and for each over-budget protein swap excess picks with
   // non-conflicting alternatives that still satisfy the day's tier gate.
+  enforcePastaCap({
+    result, cap: pastaCap, candidates: effectiveCandidates, usedThisRun,
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+  });
+
   if (Object.keys(proteinCaps).length) {
     const counts = {};
     const indicesByProtein = {}; // tag → [resultIdx, ...]
@@ -2565,6 +2639,8 @@ Return ONLY JSON, no prose, no markdown.`;
           // Don't introduce a new violation: if this candidate's protein is
           // ALSO capped and already at-or-over budget, skip it.
           if (rTag && proteinCaps[rTag] !== undefined && (counts[rTag] || 0) >= proteinCaps[rTag]) return false;
+          // Same, for pasta — which proteinTagOf hides behind the animal protein.
+          if (pastaCapBlocks(r, result, pastaCap, dayIdx)) return false;
           // Tier gate: replacement must match the day's tier constraint.
           if (!tierAllowsComplexity(tier, r.complexity)) return false;
           return true;
@@ -2623,6 +2699,7 @@ Return ONLY JSON, no prose, no markdown.`;
       const fit = swapInCandidates.find(r =>
         !usedThisRun.has(r.name) &&
         tierAllowsComplexity(slotTier, r.complexity) &&
+        !pastaCapBlocks(r, result, pastaCap, i) &&
         (proteinCaps[requiredTag] === undefined ||
           (result.filter(s => proteinTagOf(s.dinner) === requiredTag).length) < proteinCaps[requiredTag])
       );
@@ -2731,6 +2808,11 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
   // be ignored by the rule-based picker since the rule-based picker just
   // sorts by tier rank + used count.
   const proteinCapsLocal = parseProteinConstraints(instructions);
+  const pastaCapLocal = pastaCapFrom(proteinCapsLocal);
+  enforcePastaCap({
+    result, cap: pastaCapLocal, candidates: effectiveCandidates, usedThisRun,
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+  });
   const proteinRequirements = [...parseProteinRequirements(instructions)]
     .filter(tag => proteinCapsLocal[tag] === undefined || proteinCapsLocal[tag] > 0);
   for (const requiredTag of proteinRequirements) {
@@ -2748,7 +2830,8 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
       const slotTag = proteinTagOf(slot.dinner);
       if (slotTag && proteinRequirements.includes(slotTag)) continue;
       const fit = swapInCandidates.find(r =>
-        !usedThisRun.has(r.name) && tierAllowsComplexity(slotTier, r.complexity)
+        !usedThisRun.has(r.name) && tierAllowsComplexity(slotTier, r.complexity) &&
+        !pastaCapBlocks(r, result, pastaCapLocal, i)
       );
       if (fit) {
         if (slot.dinner && slot.dinner.name) usedThisRun.delete(slot.dinner.name);
@@ -2829,7 +2912,7 @@ const RECIPES_DATA = [
   {"name":"Honey-Garlic Shrimp","url":"https://www.allrecipes.com/recipe/282905/honey-garlic-shrimp/","servings":2,"ingredients":[{"name":"shrimp","quantity":"1 pound large"},{"name":"fresh garlic","quantity":"1 tablespoon"},{"name":"honey","quantity":"2 tablespoons"},{"name":"ginger","quantity":"1/2 teaspoon"},{"name":"soy sauce","quantity":"1 tablespoon"},{"name":"asian fish sauce","quantity":"1 teaspoon"},{"name":"vegetable oil","quantity":"2 teaspoons"},{"name":"green onion","quantity":"1 cup"}],"instructions":["Make sure shrimp are fully thawed and well drained.","Whisk garlic, honey, ginger, soy sauce, and fish sauce together in a bowl.","Add shrimp and toss thoroughly for 2 minutes until completely coated. Cover and marinate in the refrigerator for 30 to 60 minutes; toss occasionally.","Brush a large nonstick skillet with oil and heat over high heat. Use tongs to transfer shrimp into the hot skillet in a single layer. Set excess marinade aside.","Sear shrimp for 2 minutes, then flip over. Dump in marinade and cook for 1 minute. Turn off heat and flip shrimp once more; let sit for about 1 minute. Garnish with green onion."],"activeMinutes":15,"passiveMinutes":0,"complexity":"Light","estMinutes":20,"dishCount":2,"tags":["dinner","seafood","fast"],"imageUrl":"https://photos.anylist.com/e125a0a761a342ea879ea3a25a1a9aa5.jpg"},
   {"name":"Mediterranean Turkey Skillet","url":"https://www.tasteofhome.com/recipes/mediterranean-turkey-skillet/#RecipeCard","servings":6,"ingredients":[{"name":"olive oil","quantity":"1 tablespoon"},{"name":"ground turkey","quantity":"1 package (20 ounces)"},{"name":"zucchini","quantity":"2 medium"},{"name":"onion","quantity":"1 medium"},{"name":"banana peppers","quantity":"2"},{"name":"garlic cloves","quantity":"3"},{"name":"oregano","quantity":"1/2 teaspoon"},{"name":"black beans","quantity":"1 can (15 ounces)"},{"name":"tomatoes","quantity":"1 can (14-1/2 ounces)"},{"name":"balsamic vinegar","quantity":"1 tablespoon"},{"name":"salt","quantity":"1/2 teaspoon"}],"instructions":["In a large skillet, heat the oil over medium-high heat. Add the turkey, zucchini, onions, peppers, garlic and oregano. Cook for 10 to 12 minutes, stirring to break the meat into crumbles, until the turkey is no longer pink and the vegetables are tender. Drain any grease.","Stir in the black beans, tomatoes, balsamic vinegar and salt. Cook until heated through, stirring occasionally."],"activeMinutes":20,"passiveMinutes":10,"complexity":"Medium","estMinutes":30,"dishCount":1,"tags":["dinner","chicken","fast"],"imageUrl":"https://photos.anylist.com/a30e509b243b4e8f81ce1a26a611ffd9.jpg"},
   {"name":"Stuffed Chicken Breast","url":"https://thecozycook.com/stuffed-chicken-breast/#wprm-recipe-container-52079","servings":4,"ingredients":[{"name":"chicken breasts","quantity":"4"},{"name":"salt and pepper","quantity":""},{"name":"paprika","quantity":"1/2 teaspoon"},{"name":"olive oil","quantity":"1 tablespoon"},{"name":"spinach","quantity":"3 cups"},{"name":"garlic","quantity":"4 cloves"},{"name":"sun-dried tomatoes","quantity":"1/3 cup"},{"name":"cream cheese","quantity":"4 oz"},{"name":"mozzarella","quantity":"1 cup"},{"name":"parmesan","quantity":"1/3 cup"},{"name":"basil, oregano","quantity":"1/2 teaspoon"},{"name":"onion powder","quantity":"1/4 teaspoon"},{"name":"red pepper flakes","quantity":"1 pinch"}],"instructions":["Preheat oven to 375F.","Add 1-2 teaspoons oil in a large skillet over medium heat. Add the spinach and garlic and cook until wilted, 3-4 minutes. Let cool.","Set the spinach/garlic and sundried tomatoes aside. Combine remaining filling ingredients, then gently stir in the spinach/garlic and tomatoes.","Pat the chicken dry. Use a sharp paring knife to create a pocket for the stuffing. Be careful not to cut all the way through.","Stuff each chicken breast with the filling. Sprinkle the top with salt, pepper, and paprika.","Heat oil in a large skillet over medium-high heat. Add 2 chicken breasts at a time and sear each side until golden, 2-3 minutes.","If your skillet is not oven safe, transfer the chicken to a baking dish.","Bake at 375F for 17-20 minutes, or until the thickest part of the chicken reaches 165F. Rest for 5 minutes before serving."],"activeMinutes":25,"passiveMinutes":25,"complexity":"Heavy","estMinutes":30,"dishCount":3,"tags":["dinner","chicken"],"imageUrl":"https://photos.anylist.com/7203287af769411b92ec1e859bfe22f3.jpg"},
-  {"name":"Protein Mac and Cheese","url":"https://lemonsandzest.com/protein-packed-baked-mac-cheese/#wprm-recipe-container-7702","servings":6,"ingredients":[{"name":"protein pasta","quantity":"8 oz"},{"name":"greek yogurt","quantity":"3/4 cup"},{"name":"whole milk","quantity":"1 - 1 1/2 cups"},{"name":"butter","quantity":"2 T"},{"name":"cheddar cheese","quantity":"2 1/2 cups"},{"name":"panko/breadcrumbs","quantity":"1/2 cup"},{"name":"garlic powder","quantity":"1/2 tsp"},{"name":"paprika","quantity":"1/2 tsp"},{"name":"cracked pepper","quantity":"1/2 tsp"},{"name":"sea salt","quantity":"1/2 tsp"},{"name":"red pepper","quantity":"dash"}],"instructions":["Preheat oven to 375F.","Boil and cook pasta as directed by box instructions until al dente. Drain and set aside.","In a separate sauce pan, whisk together the Greek yogurt, butter and milk over low heat until smooth. Add in one cup of shredded cheese and stir, allowing to melt.","Add another cup and melt. Stir in seasonings, salt and pepper. Add the cheese sauce to the pasta and stir to combine.","If baking, pour cheesy pasta into a small (8x8 or 9x9) baking pan greased with spray oil.","Sprinkle with remaining shredded cheese and panko or breadcrumbs.","Bake for 15-20 minutes or until cheese on top is melted and browned and pasta is lightly bubbling."],"activeMinutes":20,"passiveMinutes":20,"complexity":"Medium","estMinutes":35,"dishCount":3,"tags":["dinner","vegetarian","kid-friendly"],"imageUrl":"https://photos.anylist.com/13497c6aa5dd4367878a10a0dc5594af.jpg"},
+  {"name":"Protein Mac and Cheese","url":"https://lemonsandzest.com/protein-packed-baked-mac-cheese/#wprm-recipe-container-7702","servings":6,"ingredients":[{"name":"protein pasta","quantity":"8 oz"},{"name":"greek yogurt","quantity":"3/4 cup"},{"name":"whole milk","quantity":"1 - 1 1/2 cups"},{"name":"butter","quantity":"2 T"},{"name":"cheddar cheese","quantity":"2 1/2 cups"},{"name":"panko/breadcrumbs","quantity":"1/2 cup"},{"name":"garlic powder","quantity":"1/2 tsp"},{"name":"paprika","quantity":"1/2 tsp"},{"name":"cracked pepper","quantity":"1/2 tsp"},{"name":"sea salt","quantity":"1/2 tsp"},{"name":"red pepper","quantity":"dash"}],"instructions":["Preheat oven to 375F.","Boil and cook pasta as directed by box instructions until al dente. Drain and set aside.","In a separate sauce pan, whisk together the Greek yogurt, butter and milk over low heat until smooth. Add in one cup of shredded cheese and stir, allowing to melt.","Add another cup and melt. Stir in seasonings, salt and pepper. Add the cheese sauce to the pasta and stir to combine.","If baking, pour cheesy pasta into a small (8x8 or 9x9) baking pan greased with spray oil.","Sprinkle with remaining shredded cheese and panko or breadcrumbs.","Bake for 15-20 minutes or until cheese on top is melted and browned and pasta is lightly bubbling."],"activeMinutes":20,"passiveMinutes":20,"complexity":"Medium","estMinutes":35,"dishCount":3,"tags":["dinner","pasta","vegetarian","kid-friendly"],"imageUrl":"https://photos.anylist.com/13497c6aa5dd4367878a10a0dc5594af.jpg"},
   {"name":"Ham \u0026 Veggie Casserole","url":"https://www.tasteofhome.com/recipes/ham-veggie-casserole/","servings":4,"ingredients":[{"name":"frozen broccoli florets","quantity":"1 package (16 ounces)"},{"name":"frozen cauliflower","quantity":"1 package (16 ounces)"},{"name":"butter","quantity":"2 teaspoons + 2 tablespoons"},{"name":"bread crumbs","quantity":"1/4 cup"},{"name":"all-purpose flour","quantity":"2 tablespoons"},{"name":"2% milk","quantity":"1-1/2 cups"},{"name":"sharp cheddar cheese","quantity":"3/4 cup"},{"name":"parmesan cheese","quantity":"1/2 cup"},{"name":"ham","quantity":"1-1/2 cups"},{"name":"pepper","quantity":"1/4 teaspoon"}],"instructions":["Preheat oven to 425F. Cook broccoli and cauliflower according to package directions; drain.","Meanwhile, in a small skillet, melt 2 teaspoons butter. Add bread crumbs; cook and stir over medium heat until lightly toasted, 2-3 minutes. Remove from heat.","In a large saucepan, melt remaining butter over medium heat. Stir in flour until smooth; gradually whisk in milk. Bring to a boil, stirring constantly; cook and stir until thickened, 1-2 minutes. Remove from heat; stir in cheeses until blended. Stir in ham, pepper and vegetables.","Transfer to a greased 8-inch square baking dish. Sprinkle with toasted crumbs. Bake, uncovered, until heated through, 10-15 minutes."],"activeMinutes":25,"passiveMinutes":25,"complexity":"Medium","estMinutes":30,"dishCount":3,"tags":["dinner","pork","freezer-friendly","make-ahead"],"imageUrl":"https://photos.anylist.com/73d5605b41674e5ca59bb5c7dae19052.jpg"},
   {"name":"Chicken with Spinach and Mushrooms","url":"https://www.tasteofhome.com/recipes/spinach-and-mushroom-smothered-chicken/","servings":4,"ingredients":[{"name":"olive oil","quantity":"1-1/2 teaspoons"},{"name":"fresh mushrooms","quantity":"1-3/4 cups"},{"name":"green onions","quantity":"3"},{"name":"fresh spinach","quantity":"3 cups"},{"name":"pecans","quantity":"2 tablespoons"},{"name":"chicken breast halves","quantity":"4"},{"name":"rotisserie chicken seasoning","quantity":"1/2 teaspoon"},{"name":"provolone cheese","quantity":"2 slices"}],"instructions":["Preheat the grill or broiler. In a large skillet, heat the oil over medium-high heat, and saute the mushrooms and green onions until tender. Stir in the spinach and chopped pecans until the spinach is wilted. Remove from the heat; keep warm.","Sprinkle the chicken with the seasoning. Grill the chicken, covered, on an oiled grill rack over medium-high heat until a thermometer reads 165F, four to five minutes per side. Top with the cheese, then grill until the cheese is melted. To serve, top with the mushroom mixture."],"activeMinutes":25,"passiveMinutes":0,"complexity":"Medium","estMinutes":30,"dishCount":2,"tags":["dinner","chicken","fast"],"imageUrl":"https://photos.anylist.com/72d463854a1546b6a2cdbc01e8ff1462.jpg"},
   {"name":"Turkey Gyros","url":"https://www.tasteofhome.com/recipes/turkey-gyros/","servings":4,"ingredients":[{"name":"cucumber","quantity":"1 medium"},{"name":"sour cream","quantity":"2/3 cup"},{"name":"onion","quantity":"1/4 cup"},{"name":"dill weed","quantity":"2 teaspoons"},{"name":"lemon juice","quantity":"2 teaspoons"},{"name":"olive oil","quantity":"1 teaspoon"},{"name":"turkey breast tenderloin","quantity":"1/2 pound"},{"name":"greek seasoning","quantity":"1-1/2 teaspoons"},{"name":"lettuce","quantity":"1-1/2 cups"},{"name":"thin tomato slices","quantity":"8"},{"name":"whole pita breads","quantity":"4"},{"name":"crumbled feta cheese","quantity":"2 tablespoons"}],"instructions":["Finely chop a third of the cucumber. For sauce, mix sour cream, onion, dill, lemon juice and chopped cucumber. Thinly slice remaining cucumber.","In a nonstick skillet, heat oil over medium-high heat; saute turkey until no longer pink, 4-6 minutes. Stir in Greek seasoning. Serve turkey, lettuce, tomato and sliced cucumber on pitas; top with sauce and cheese."],"activeMinutes":20,"passiveMinutes":0,"complexity":"Light","estMinutes":25,"dishCount":1,"tags":["dinner","chicken","fast"],"imageUrl":"https://photos.anylist.com/6d1bb9949c1b44eab6c899d1929ec9b3.jpg"},
