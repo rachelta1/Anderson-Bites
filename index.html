@@ -1428,6 +1428,61 @@ function recipeSeed(r) {
   return Math.abs(h) || 1;
 }
 
+/* Is this URL a site logo / favicon / sprite rather than a photo of food?
+   Import used to take whatever og:image said, and on a page that served a
+   consent wall, a bot block, or just a lazy og tag that meant the site's
+   logo — which then rendered as the recipe's "photo" and looked like an icon.
+
+   Two signals, both from the URL alone (we never get to measure the file):
+   an icon-ish word in the path, or a dimension hint showing something too
+   small to be a real photo. Image CDNs write those sizes into the path
+   (/144x144/, -100x100.jpg, ?w=64), so a thumbnail crop is recognisable
+   even when the filename looks fine. */
+const ICON_WORD_RE = /(favicon|apple-touch|touch-icon|\bicons?\b|logo|sprite|badge|avatar|placeholder|default-image|social-share)/i;
+const MIN_PHOTO_PX = 200;
+function looksLikeIcon(url) {
+  if (!url || typeof url !== 'string') return true;
+  const u = url.trim();
+  if (!u || !/^https?:\/\//i.test(u)) return true;
+  // Vector and icon container formats are never a photo of dinner.
+  if (/\.(svg|ico)(\?|#|$)/i.test(u)) return true;
+  if (ICON_WORD_RE.test(u)) return true;
+  // "/144x144/" or "-100x100." — both numbers present, so a real dimension.
+  let m;
+  const pairRe = /[/_-](\d{2,4})x(\d{2,4})[/_.-]/g;
+  while ((m = pairRe.exec(u)) !== null) {
+    const w = +m[1], h = +m[2];
+    // A 0 means "unconstrained on that axis" in several CDNs (750x0), so
+    // judge on whichever dimension was actually pinned.
+    const px = Math.max(w, h);
+    if (px && px < MIN_PHOTO_PX) return true;
+  }
+  // ?w=64 / &width=80 / ?size=100
+  const qRe = /[?&](?:w|width|h|height|size|s)=(\d{2,4})\b/gi;
+  while ((m = qRe.exec(u)) !== null) {
+    if (+m[1] < MIN_PHOTO_PX) return true;
+  }
+  return false;
+}
+
+/* Pull the photo out of a schema.org Recipe node. This is the recipe's OWN
+   picture, published by the site as part of the recipe — a better source than
+   og:image, which describes the PAGE and is the tag that goes wrong when the
+   page is a consent wall. `image` may be a bare URL, an ImageObject, or an
+   array of either; prefer the first entry that isn't an icon. */
+function extractSchemaImage(schema) {
+  if (!schema) return null;
+  const seen = [];
+  const collect = (v, depth) => {
+    if (!v || depth > 3 || seen.length > 12) return;
+    if (typeof v === 'string') { seen.push(v); return; }
+    if (Array.isArray(v)) { v.forEach(x => collect(x, depth + 1)); return; }
+    if (typeof v === 'object') { collect(v.url || v.contentUrl || v['@id'], depth + 1); }
+  };
+  collect(schema.image, 0);
+  return seen.find(u => !looksLikeIcon(u)) || null;
+}
+
 /* How the dish is plated, inferred from tags, so a soup is photographed in a
    bowl and a sheet-pan dinner on its tray. Only matters for recipes with no
    imagePrompt of their own — everything Claude writes from now on says this
@@ -1457,6 +1512,37 @@ function recipePhotoSubject(r) {
   return `${name}, ${servingStyleFor(r)}`;
 }
 
+/* Photos pinned by hand for recipes whose source gave us a bad one. These sit
+   in the code rather than in the library because the library is synced data:
+   editing a recipe's photo here reaches the copy already on every device,
+   which a one-off edit to a saved row would not.
+
+   Match on `url` when the source is known (most precise) or `name` otherwise.
+   Both must match if both are given. Keep this list short — it is a patch for
+   specific recipes, not a general mechanism; the 📷 button on a recipe is how
+   photos are normally changed. */
+const PHOTO_FIXES = [
+  {
+    // allrecipes served its logo as og:image on this one.
+    name: /\boatmeal\b.*\bmuffins?\b/i,
+    image: 'https://www.allrecipes.com/thmb/TSYKCMos60DkK2n4Zy9UoScVJpo=/750x0/filters:no_upscale():max_bytes(150000):strip_icc()/AR-22458-easy-oatmeal-muffins-DDMFS-4x3-5545738c08d747b8b694cb0eb5aa3ac5.jpg',
+  },
+  {
+    // Photo supplied by Rachel; served from the repo alongside index.html.
+    name: /\bpork\b.*\b(tenderloin|loin)\b|\b(tenderloin|loin)\b.*\bpork\b/i,
+    image: 'photos/pork-tenderloin.jpg',
+  },
+];
+function pinnedPhotoFor(r) {
+  if (!r || !r.name) return null;
+  for (const fix of PHOTO_FIXES) {
+    if (fix.url && !(r.url || '').includes(fix.url)) continue;
+    if (fix.name && !fix.name.test(r.name)) continue;
+    return fix.image;
+  }
+  return null;
+}
+
 /* Ordered list of image sources to try; the emoji is the last resort, and
    RecipeThumb cycles through on <img> error.
 
@@ -1470,14 +1556,33 @@ function recipePhotoSources(r, w, h) {
   const W = w || 600, H = h || 400;
   const seed = recipeSeed(r);
   const out = [];
-  // A real photo of the real dish beats a generated one: og:image captured
-  // during URL import, or a URL the user pasted in themselves.
-  if (r && r.image) out.push(r.image);
+  // A real photo of the real dish beats a generated one: the photo captured
+  // during URL import, or a URL the user pasted in themselves. Icons are
+  // filtered here as well as at import, so recipes that already stored a site
+  // logo before that check existed fix themselves on next render — with one
+  // exception: a URL the user chose by hand is theirs to choose, even if it
+  // trips the heuristic.
+  const own = r && r.image;
+  // A photo the user chose themselves outranks a pinned fix — the fix exists
+  // to correct a bad import, not to overrule a deliberate choice.
+  if (own && r.imagePinned) out.push(own);
+  const pinned = pinnedPhotoFor(r);
+  if (pinned) out.push(pinned);
+  if (own && !r.imagePinned && !looksLikeIcon(own)) out.push(own);
   const prompt = encodeURIComponent(
     `professional food photography of ${recipePhotoSubject(r)}, overhead shot, natural light, appetizing, no text, no people`
   );
   out.push(`https://image.pollinations.ai/prompt/${prompt}?width=${W}&height=${H}&nologo=true&seed=${seed}`);
   return out;
+}
+
+/* Wrap a URL for CSS `url()`. Quoting is not optional: image CDNs put
+   parentheses in the path — allrecipes serves
+   .../filters:no_upscale():max_bytes(150000)/... — and an unquoted url()
+   token containing "(" is a CSS parse error, so the whole declaration is
+   dropped and the photo silently never appears. */
+function cssUrl(u) {
+  return `url("${String(u).replace(/["\\]/g, '\\$&')}")`;
 }
 
 function fallbackEmoji(r) {
@@ -1721,11 +1826,15 @@ function extractOgImage(html) {
     /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
     /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i,
   ];
+  // Take the first tag that isn't a logo/thumbnail, rather than the first tag
+  // outright — a page often carries several, and the site logo is frequently
+  // one of them.
+  const found = [];
   for (const p of patterns) {
     const m = html.match(p);
-    if (m) return m[1];
+    if (m && m[1]) found.push(m[1]);
   }
-  return null;
+  return found.find(u => !looksLikeIcon(u)) || null;
 }
 
 function trimHtmlForLlm(html, max) {
@@ -1828,7 +1937,10 @@ function normalizeRecipeFromLlm(parsed, fallback) {
   const isFast = out.activeMinutes <= 30 && out.dishCount <= 2;
   if (isFast && !out.tags.includes('fast')) out.tags.push('fast');
   if (!isFast) out.tags = out.tags.filter(t => t !== 'fast');
-  if (fallback && fallback.image) out.image = fallback.image;
+  // Only keep a captured photo if it is actually a photo. A rejected one
+  // leaves image unset, and the recipe gets a generated picture of the dish
+  // instead of the site's logo.
+  if (fallback && fallback.image && !looksLikeIcon(fallback.image)) out.image = fallback.image;
   // searchHint: the user's original description, kept ONLY for image
   // keyword extraction. Set when generating from a description; absent
   // for URL imports (those have og:image as the strong source).
@@ -3435,12 +3547,14 @@ function RecipePhotoSheet({ recipe, onApply, onClose }) {
   const preview = { ...recipe, image: url.trim() || undefined };
   const shuffle = () => {
     // A fresh seed and no pasted URL, so the generated photo is what shows.
-    onApply({ image: '', photoSeed: Math.floor(Math.random() * 1e9) });
+    onApply({ image: '', imagePinned: false, photoSeed: Math.floor(Math.random() * 1e9) });
   };
   const useUrl = () => {
     const u = url.trim();
     if (!u) return;
-    onApply({ image: u });
+    // imagePinned: the user picked this one deliberately, so the icon filter
+    // stands aside even if the URL looks like a thumbnail.
+    onApply({ image: u, imagePinned: true });
     onClose();
   };
   return (
@@ -3477,7 +3591,7 @@ function RecipePhotoSheet({ recipe, onApply, onClose }) {
           <div
             className="gen-btn"
             style={{ flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)' }}
-            onClick={() => { onApply({ image: '', photoSeed: null }); onClose(); }}
+            onClick={() => { onApply({ image: '', imagePinned: false, photoSeed: null }); onClose(); }}
           >Reset</div>
           <div
             className="gen-btn"
@@ -6040,13 +6154,16 @@ function AddRecipeURLScreen({ onBack, apiKey, onSave, onTab }) {
     setErrMsg('');
     try {
       const html = await fetchPageHtml(trimmed);
-      const ogImage = extractOgImage(html);
       // PREFER structured Recipe data when the site publishes it. JSON-LD
       // has the canonical ingredient list (with fractions intact) and the
       // canonical instruction steps in clean form — no "jump to recipe"
       // buttons, no ads, no related-article noise. The LLM's job becomes
       // a near-mechanical copy.
       const recipeSchema = extractRecipeSchema(html);
+      // The recipe's own published photo first, the page's og:image second.
+      // og:image describes the PAGE, so on a consent wall or bot-block it is
+      // the site logo — which is how recipes ended up wearing an icon.
+      const pageImage = extractSchemaImage(recipeSchema) || extractOgImage(html);
       let userMsg;
       if (recipeSchema) {
         const schemaJson = JSON.stringify(recipeSchema, null, 2).slice(0, 60000);
@@ -6064,7 +6181,7 @@ function AddRecipeURLScreen({ onBack, apiKey, onSave, onTab }) {
         maxTokens: 16000,
       });
       const parsed = extractJson(text);
-      const recipe = normalizeRecipeFromLlm(parsed, { url: trimmed, image: ogImage });
+      const recipe = normalizeRecipeFromLlm(parsed, { url: trimmed, image: pageImage });
       setData(recipe);
       setStage('preview');
     } catch (e) {
@@ -6595,7 +6712,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
       {activeTab === 'ingredients' ? (
         <>
           {/* Hero */}
-          <div className="hero-img" style={heroUrl ? { backgroundImage:`url(${heroUrl})`, backgroundSize:'cover', backgroundPosition:'center', backgroundColor:'#000' } : null}>
+          <div className="hero-img" style={heroUrl ? { backgroundImage: cssUrl(heroUrl), backgroundSize:'cover', backgroundPosition:'center', backgroundColor:'#000' } : null}>
             {heroUrl && (
               <img src={heroUrl} alt="" onError={() => setHeroIdx(heroIdx + 1)} style={{ display:'none' }} />
             )}
