@@ -1506,6 +1506,11 @@ function servingStyleFor(r) {
    a picture generated from "simmer for 2 hours, pull the meat" is a mess. The
    dish name plus how it is served is the reliable signal. */
 function recipePhotoSubject(r) {
+  // A pinned subject outranks the recipe's own: it exists precisely because
+  // the stored one produced the wrong picture. (PHOTO_FIXES is defined below;
+  // this only runs at render, long after the module has evaluated.)
+  const fix = pinnedFixFor(r);
+  if (fix && fix.imagePrompt) return fix.imagePrompt;
   const written = r && typeof r.imagePrompt === 'string' && r.imagePrompt.trim();
   if (written) return written;
   const name = (r && r.name) || 'home cooked meal';
@@ -1517,10 +1522,19 @@ function recipePhotoSubject(r) {
    editing a recipe's photo here reaches the copy already on every device,
    which a one-off edit to a saved row would not.
 
-   Match on `url` when the source is known (most precise) or `name` otherwise.
-   Both must match if both are given. Keep this list short — it is a patch for
-   specific recipes, not a general mechanism; the 📷 button on a recipe is how
-   photos are normally changed. */
+   Match on `url` when the source is known (most precise) or `name` otherwise;
+   both must match if both are given. A fix supplies EITHER an `image` (a real
+   photo to use) or an `imagePrompt` (the subject to generate one from) — the
+   latter for dishes where no photo is to hand but the name alone generates
+   the wrong picture.
+
+   ORDER MATTERS: the first match wins, so specific entries go above general
+   ones. Write patterns that pin down the actual dish. A loose pattern here
+   silently repaints a neighbouring recipe — "pork + tenderloin" once put a
+   dark pan-jus photo onto a dish in a white mustard sauce.
+
+   Keep this list short. It patches specific recipes; the 📷 button on a
+   recipe is how photos are normally changed. */
 const PHOTO_FIXES = [
   {
     // allrecipes served its logo as og:image on this one.
@@ -1528,17 +1542,25 @@ const PHOTO_FIXES = [
     image: 'https://www.allrecipes.com/thmb/TSYKCMos60DkK2n4Zy9UoScVJpo=/750x0/filters:no_upscale():max_bytes(150000):strip_icc()/AR-22458-easy-oatmeal-muffins-DDMFS-4x3-5545738c08d747b8b694cb0eb5aa3ac5.jpg',
   },
   {
+    // The sauce is the whole point of this dish and it is pale, so the picture
+    // has to say so — left to the name alone, "pork tenderloin" generates the
+    // usual dark-glazed roast. Above the generic pork entry deliberately.
+    name: /\bpork\b.*\bcreamy\b.*\bmustard\b|\bcreamy\b.*\bmustard\b.*\bpork\b/i,
+    imagePrompt: 'sliced roast pork tenderloin medallions in a creamy white mustard sauce, pale sauce spooned over and pooled on the plate, fresh thyme, on a white plate',
+  },
+  {
     // Photo supplied by Rachel; served from the repo alongside index.html.
+    // Deliberately below the entry above, which claims the mustard-sauce one.
     name: /\bpork\b.*\b(tenderloin|loin)\b|\b(tenderloin|loin)\b.*\bpork\b/i,
     image: 'photos/pork-tenderloin.jpg',
   },
 ];
-function pinnedPhotoFor(r) {
+function pinnedFixFor(r) {
   if (!r || !r.name) return null;
   for (const fix of PHOTO_FIXES) {
     if (fix.url && !(r.url || '').includes(fix.url)) continue;
     if (fix.name && !fix.name.test(r.name)) continue;
-    return fix.image;
+    return fix;
   }
   return null;
 }
@@ -1566,8 +1588,8 @@ function recipePhotoSources(r, w, h) {
   // A photo the user chose themselves outranks a pinned fix — the fix exists
   // to correct a bad import, not to overrule a deliberate choice.
   if (own && r.imagePinned) out.push(own);
-  const pinned = pinnedPhotoFor(r);
-  if (pinned) out.push(pinned);
+  const fix = pinnedFixFor(r);
+  if (fix && fix.image) out.push(fix.image);
   if (own && !r.imagePinned && !looksLikeIcon(own)) out.push(own);
   const prompt = encodeURIComponent(
     `professional food photography of ${recipePhotoSubject(r)}, overhead shot, natural light, appetizing, no text, no people`
