@@ -185,13 +185,21 @@ The biggest sub-section and the most interesting. Three parts:
   classify complexity, pick the right tags).
 - **`callClaude`** (line ~1196): the actual API call to Anthropic.
 - **Re-plan around what's on hand** (`readPlannedDays`,
-  `swapPlanForHavesWithLLM`, `swapPlanForHavesLocal`): the "Bought
-  something else?" card on Auto-Plan. Reads the dinners already on the
-  calendar, swaps the fewest that will use up what actually came home,
-  and passes those shopping names to `applyPlan` as `alreadyHave` so
-  they come off the grocery list too. Deliberately conservative: the
-  rule-based path will not change more than three dinners, since the
-  job is absorbing a shop, not replanning the week.
+  `swapPlanForHavesWithLLM`): the "Bought something else?" card on
+  Auto-Plan. Reads the dinners already on the calendar, swaps the
+  fewest that will use up what actually came home, and passes those
+  shopping names to `applyPlan` as `alreadyHave` so they come off the
+  grocery list too.
+
+  This is the one call that runs on **Opus 5** (`MODEL_DEEP`) with
+  adaptive thinking — it has to weigh a whole written week against a
+  fridge and change as little as possible, while holding the effort
+  tiers and the pasta cap. It is also the only flow with **no
+  rule-based fallback**: word-matching a haul against ingredient lists
+  can't weigh whether a swap is worth making, and quietly serving a
+  worse answer under the same button is worse than saying it can't run.
+  Without a key, the sheet says so; if the call fails, it reports the
+  error and leaves the plan untouched.
 - **Autoplan logic** (lines ~1500–2250): two pickers that decide
   which dinner goes on which day. **`pickPlanWithLLM`** asks Claude
   for picks and validates them against the day's tier. **`pickPlan`**

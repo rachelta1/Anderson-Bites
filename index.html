@@ -1715,6 +1715,12 @@ Output JSON only.`;
    one at roughly a third the price. */
 const MODEL_SMART = 'claude-sonnet-5';  // recipe import + meal planning
 const MODEL_FAST = 'claude-haiku-4-5';  // grocery categorization
+/* Reworking a written week around an unplanned shop is the hardest thing the
+   app asks for: it has to weigh what is already planned against what is in the
+   fridge and change as little as possible, while holding the effort tiers and
+   the pasta cap. It runs rarely and a bad answer costs a real dinner, so it
+   gets the strongest model. */
+const MODEL_DEEP = 'claude-opus-5';     // re-planning around what's on hand
 
 /* Sonnet 5 thinks by default when `thinking` is omitted, and thinking spends
    from the SAME max_tokens budget as the answer — so an unbounded setting can
@@ -3028,89 +3034,6 @@ function readPlannedDays({ weekMap, recipeDB, planOffset }) {
   }).filter(Boolean);
 }
 
-/* Which words in a free-text haul name food. Used by the rule-based fallback
-   to score recipes; the LLM path gets the raw sentence and does better. */
-const HAVE_STOP = new Set([
-  'a','an','the','and','or','of','with','for','some','lots','lot','bunch','pack','packs',
-  'bag','bags','box','boxes','can','cans','jar','jars','lb','lbs','pound','pounds','oz',
-  'ounce','ounces','kg','g','gram','grams','got','bought','have','has','he','she','they',
-  'my','husband','wife','random','instead','extra','big','small','fresh','from','store',
-  'came','home','with','also','plus','couple','few','more','this','that','these','those',
-  'is','are','was','were','it','its','i','we','us','on','in','at','to','put','fridge',
-  'freezer','picked','up','something','things','stuff','item','items','grocery','groceries',
-]);
-function haveTokens(text) {
-  return [...new Set(String(text || '').toLowerCase()
-    .split(/[^a-z]+/)
-    .filter(w => w.length > 2 && !HAVE_STOP.has(w))
-    .map(singularizeWord))];
-}
-
-/* How well a recipe uses up a haul. Counts DISTINCT have-words that show up in
-   the recipe's ingredients, so a recipe using beef and peppers beats one that
-   merely says "beef" three times. */
-function haveScore(recipe, tokens) {
-  if (!recipe || !tokens.length) return 0;
-  const hay = ((recipe.ingredients || []).join(' ') + ' ' + (recipe.name || '')).toLowerCase();
-  let n = 0;
-  for (const t of tokens) if (hay.includes(t)) n++;
-  return n;
-}
-
-/* Rule-based fallback for the swap, used when there is no API key or the model
-   call fails. Swaps the planned dinners that use the haul LEAST for library
-   recipes that use it MOST, one day at a time, respecting the day's effort
-   tier and never introducing a duplicate. */
-function swapPlanForHavesLocal({ recipeDB, plan, haves, pastaCap }) {
-  const tokens = haveTokens(haves);
-  const result = plan.map(p => ({ ...p }));
-  if (!tokens.length) return { plan: result, changed: [], haveIngredients: [] };
-
-  const planned = new Set(result.map(p => p.dinner && p.dinner.name).filter(Boolean));
-  const candidates = (recipeDB || [])
-    .filter(r => r && isAutoplanEligible(r) && !planned.has(r.name))
-    .map(r => ({ r, score: haveScore(r, tokens) }))
-    .filter(x => x.score > 0)
-    .sort((a, b) => b.score - a.score);
-  if (!candidates.length) return { plan: result, changed: [], haveIngredients: tokens };
-
-  // Weakest current fit goes first — a day already cooking the haul stays put.
-  const order = result
-    .map((p, i) => ({ i, score: haveScore(p.dinner, tokens) }))
-    .sort((a, b) => a.score - b.score);
-
-  const changed = [];
-  const used = new Set(planned);
-  let pastaCount = result.filter(p => isPastaDish(p.dinner)).length;
-  // Hard ceiling on how much of the week this may rewrite. Without it a haul
-  // whose words appear loosely across the library swaps every single day —
-  // the opposite of the point, which is to absorb a shop, not replan the week.
-  // A haul is a handful of items; two or three dinners will use it up.
-  const maxSwaps = Math.max(1, Math.min(3, Math.floor(plan.length / 2)));
-  for (const { i, score } of order) {
-    if (changed.length >= maxSwaps) break;
-    const slot = result[i];
-    const pick = candidates.find(c =>
-      !used.has(c.r.name) &&
-      c.score > score &&
-      tierAllowsComplexity(slot.tier || 'free', c.r.complexity) &&
-      !(isPastaDish(c.r) && !isPastaDish(slot.dinner) && pastaCount >= pastaCap));
-    if (!pick) continue;
-    if (isPastaDish(slot.dinner) && !isPastaDish(pick.r)) pastaCount--;
-    if (!isPastaDish(slot.dinner) && isPastaDish(pick.r)) pastaCount++;
-    used.delete(slot.dinner && slot.dinner.name);
-    used.add(pick.r.name);
-    changed.push({ dt: slot.dt, from: slot.dinner && slot.dinner.name, to: pick.r.name });
-    result[i] = { ...slot, dinner: pick.r };
-    // Stop early once the plan already covers every word of the haul — a
-    // single package of mince should cost one swap, not the ceiling.
-    const covered = new Set();
-    result.forEach(p => tokens.forEach(t => { if (haveScore(p.dinner, [t])) covered.add(t); }));
-    if (covered.size >= tokens.length) break;
-  }
-  return { plan: result, changed, haveIngredients: tokens };
-}
-
 const REPLAN_SYSTEM = `You adjust an ALREADY-WRITTEN week of dinners after the shopping came home wrong.
 
 You are given the dinners currently on the calendar, a free-text description of what the user actually has, and the recipe library. Swap the FEWEST dinners that will use up what they have.
@@ -3156,7 +3079,16 @@ async function swapPlanForHavesWithLLM({ apiKey, recipeDB, plan, haves, pastaCap
 
   const user = `WHAT I ACTUALLY HAVE:\n"""${haves}"""\n\nCURRENT PLAN (every dt must come back in your picks):\n${JSON.stringify(current, null, 2)}\n\nPASTA_MAX (hard maximum, counting dinners with "isPasta": true):\n${pastaCap}\n\nRECIPE LIBRARY (dinners not already in the plan):\n${JSON.stringify(slim, null, 2)}`;
 
-  const text = await callClaude({ apiKey, system: REPLAN_SYSTEM, user, thinking: NO_THINKING, maxTokens: 8192 });
+  /* Adaptive thinking, deliberately. This is a constraint problem — fewest
+     swaps, tier gates, pasta cap, no duplicates — and it is the one call worth
+     paying to reason through. Opus 5 thinks by default anyway; turning it off
+     on that model is a documented way to get a truncated answer or stray
+     reasoning tags in the JSON. Thinking spends from the same max_tokens as
+     the answer, hence the bigger budget. */
+  const text = await callClaude({
+    apiKey, system: REPLAN_SYSTEM, user,
+    model: MODEL_DEEP, thinking: THINKING, effort: 'high', maxTokens: 16000,
+  });
   const parsed = extractJson(text);
   if (!parsed || !Array.isArray(parsed.picks)) throw new Error('Bad re-plan response shape');
 
@@ -3192,9 +3124,11 @@ async function swapPlanForHavesWithLLM({ apiKey, recipeDB, plan, haves, pastaCap
     tierOf: (s) => s.tier || 'free',
   });
 
+  // The model is asked for these; an answer without them still swaps dinners
+  // correctly, it just won't strike anything off the shopping list.
   const haveIngredients = Array.isArray(parsed.haveIngredients)
     ? parsed.haveIngredients.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim().toLowerCase())
-    : haveTokens(haves);
+    : [];
   return { plan: result, changed, haveIngredients };
 }
 
@@ -3834,9 +3768,10 @@ function RecipePhotoSheet({ recipe, onApply, onClose }) {
 }
 
 /* Describe what actually came home, and re-plan the week around it. */
-function UseWhatIHaveSheet({ weekTitle, plannedCount, busy, onRun, onClose }) {
+function UseWhatIHaveSheet({ weekTitle, plannedCount, busy, hasKey, error, onRun, onClose }) {
   const [text, setText] = useState('');
-  const ready = text.trim().length > 1 && plannedCount > 0;
+  const blocked = plannedCount === 0 || !hasKey;
+  const ready = text.trim().length > 1 && !blocked;
   return (
     <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
@@ -3846,28 +3781,46 @@ function UseWhatIHaveSheet({ weekTitle, plannedCount, busy, onRun, onClose }) {
           <span className="modal-close" onClick={busy ? undefined : onClose}>×</span>
         </div>
         <div style={{ fontSize:15, color:'var(--text-dimmer)', marginBottom:10, lineHeight:1.5 }}>
-          {plannedCount > 0
-            ? <>Tell me what's in the fridge and I'll swap the fewest dinners in <b>{weekTitle}</b> that use it up, then take those things off your shopping list.</>
-            : <>There are no dinners planned in <b>{weekTitle}</b> yet — generate a plan first, then come back here to adjust it.</>}
+          {plannedCount === 0
+            ? <>There are no dinners planned in <b>{weekTitle}</b> yet — generate a plan first, then come back here to adjust it.</>
+            : <>Tell me what's in the fridge and I'll swap the fewest dinners in <b>{weekTitle}</b> that use it up, then take those things off your shopping list.</>}
         </div>
+        {!hasKey && plannedCount > 0 && (
+          <div style={{ background:'#2a1420', border:'1.5px solid #5a2030', borderRadius:10,
+                        padding:'10px 12px', fontSize:15, color:'#e29090', lineHeight:1.5, marginBottom:10 }}>
+            This one needs an API key — it asks Claude to weigh your whole week against what you
+            bought, which is not something the app can work out on its own. Add a key in Settings.
+          </div>
+        )}
         <textarea
           className="text-input"
           value={text}
           onChange={e => setText(e.target.value)}
           placeholder={'e.g. "2 lbs ground beef, a pack of pork chops, bag of red peppers and some sour cream"'}
           style={{ minHeight:110, lineHeight:1.5, marginBottom:4 }}
-          disabled={busy || plannedCount === 0}
+          disabled={busy || blocked}
         />
-        <div style={{ fontSize:13, color:'var(--text-dimmer)', marginBottom:4 }}>
-          {plannedCount} dinner{plannedCount === 1 ? '' : 's'} currently planned. Everything that already
-          works with what you have stays put.
-        </div>
+        {error ? (
+          <div style={{ background:'#2a1420', border:'1.5px solid #5a2030', borderRadius:10,
+                        padding:'10px 12px', fontSize:15, color:'#e29090', lineHeight:1.5,
+                        margin:'6px 0 4px', wordBreak:'break-word' }}>
+            ✗ Couldn't rework your week: {error}
+            <div style={{ fontSize:13, marginTop:4, opacity:0.85 }}>
+              Your plan is untouched. Try again — nothing was changed.
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize:13, color:'var(--text-dimmer)', marginBottom:4 }}>
+            {plannedCount} dinner{plannedCount === 1 ? '' : 's'} currently planned. Everything that already
+            works with what you have stays put.
+          </div>
+        )}
         <div className="btn-wrap" style={{ padding:'14px 0 4px' }}>
           <div
             className="gen-btn"
             style={ready && !busy ? null : { opacity:0.5, cursor: busy ? 'wait' : 'default' }}
             onClick={ready && !busy ? () => onRun(text.trim()) : undefined}
-          >{busy ? '⏳ Reworking your week…' : '✦ Update my plan'}</div>
+          >{busy ? '⏳ Thinking it through…' : error ? '✦ Try again' : '✦ Update my plan'}</div>
         </div>
       </div>
     </div>
@@ -7528,6 +7481,7 @@ function AutoPlanScreen({
   const [haveSheet, setHaveSheet] = useState(false);
   const [haveBusy, setHaveBusy] = useState(false);
   const [haveNames, setHaveNames] = useState([]);
+  const [haveError, setHaveError] = useState('');
 
   const [instructions, setInstructions] = usePersistedState('ab.autoplan.instructions.v2', 'Have chicken two nights');
   const [avoidIdx, setAvoidIdx] = usePersistedState('ab.autoplan.avoidIdx', 2);
@@ -8026,33 +7980,29 @@ function AutoPlanScreen({
     setHaveBusy(true);
     setGenStatus('');
     const pastaCap = pastaCapFrom(parseProteinConstraints(instructions));
-    let out = null;
-    let note = '';
-    if (apiKey) {
-      try {
-        out = await swapPlanForHavesWithLLM({ apiKey, recipeDB, plan: plannedDays, haves, pastaCap });
-      } catch (e) {
-        note = `Claude couldn't rework it (${e.message}) — matched on ingredients instead`;
-      }
-    } else {
-      note = 'No API key — matched what you have against recipe ingredients';
+    /* No rule-based fallback here, on purpose. Word-matching a haul against
+       ingredient lists cannot weigh "is this swap worth making" — it produced
+       plausible-looking swaps that missed the point — and quietly serving a
+       worse answer under the same button is worse than saying it can't run. */
+    let out;
+    try {
+      out = await swapPlanForHavesWithLLM({ apiKey, recipeDB, plan: plannedDays, haves, pastaCap });
+    } catch (e) {
+      setHaveBusy(false);
+      setHaveError(e.message || String(e));
+      return;
     }
-    if (!out) out = swapPlanForHavesLocal({ recipeDB, plan: plannedDays, haves, pastaCap });
     setHaveBusy(false);
     setHaveSheet(false);
+    setHaveNames(out.haveIngredients || []);
 
     if (!out.changed.length) {
       // Nothing to swap is a real answer, not a failure: the week may already
       // cook what came home. Say so instead of opening an unchanged preview.
-      setGenStatus(note
-        ? `${note} · nothing needed swapping`
-        : '✓ Your plan already uses what you have — nothing to swap');
-      setHaveNames(out.haveIngredients || []);
+      setGenStatus('✓ Your plan already uses what you have — nothing to swap');
       setTimeout(() => setGenStatus(''), 6000);
       return;
     }
-    setHaveNames(out.haveIngredients || []);
-    if (note) { setGenStatus(note); setTimeout(() => setGenStatus(''), 6000); }
     setPreviewModal({
       perDay: out.plan,
       weekTitle: planWeekTitle(planOffset),
@@ -8378,8 +8328,10 @@ function AutoPlanScreen({
           weekTitle={planWeekTitle(planOffset)}
           plannedCount={plannedDays.length}
           busy={haveBusy}
-          onRun={runUseWhatIHave}
-          onClose={() => setHaveSheet(false)}
+          hasKey={!!apiKey}
+          error={haveError}
+          onRun={(t) => { setHaveError(''); runUseWhatIHave(t); }}
+          onClose={() => { setHaveSheet(false); setHaveError(''); }}
         />
       )}
 
