@@ -4401,6 +4401,12 @@ function categorize(name) {
 
 function PantrySheet({ staples, setStaples, onClose }) {
   const [val, setVal] = useState('');
+  // Which staple is being renamed, and the text in progress. Tapping the words
+  // edits; the × deletes. Before this, a tap deleted, so fixing a typo meant
+  // losing the item and retyping it.
+  const [editing, setEditing] = useState(null);
+  const [draft, setDraft] = useState('');
+
   const add = () => {
     const t = val.trim().toLowerCase();
     if (!t) return;
@@ -4409,6 +4415,29 @@ function PantrySheet({ staples, setStaples, onClose }) {
     setVal('');
   };
   const remove = (item) => setStaples(staples.filter(s => s !== item));
+
+  const startEdit = (item) => { setEditing(item); setDraft(item); };
+  const cancelEdit = () => { setEditing(null); setDraft(''); };
+  const commitEdit = () => {
+    if (editing === null) return;
+    const next = draft.trim().toLowerCase();
+    // Cleared to nothing means get rid of it — a staple with no name matches
+    // nothing, so leaving a blank pill behind would just be litter.
+    if (!next) { setStaples(staples.filter(s => s !== editing)); cancelEdit(); return; }
+    if (next === editing) { cancelEdit(); return; }
+    // Rename in place so the item keeps its spot, then collapse it against any
+    // staple of the same name rather than leaving a duplicate that matches twice.
+    const seen = new Set();
+    setStaples(staples
+      .map(s => (s === editing ? next : s))
+      .filter(s => {
+        const k = s.toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      }));
+    cancelEdit();
+  };
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
@@ -4419,6 +4448,7 @@ function PantrySheet({ staples, setStaples, onClose }) {
         </div>
         <div style={{ fontSize:15, color:'var(--text-dimmer)', marginBottom:10 }}>
           These items are assumed to be in your kitchen and won't be added to the grocery list.
+          Tap an item to fix its wording; tap its × to remove it.
         </div>
         <div style={{ display:'flex', gap:8, marginBottom:10 }}>
           <input
@@ -4427,16 +4457,45 @@ function PantrySheet({ staples, setStaples, onClose }) {
             onChange={e => setVal(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') add(); }}
             placeholder="add staple (e.g. paprika)"
+            autoCapitalize="none"
             style={{ flex:1 }}
           />
           <div onClick={add} style={{ padding:'0 14px', background:'var(--purple-mid)', border:'1.5px solid var(--purple)', borderRadius:10, color:'var(--purple-light)', display:'flex', alignItems:'center', fontSize:17, cursor:'pointer' }}>add</div>
         </div>
         <div style={{ overflowY:'auto', overflowX:'hidden', flex:1, display:'flex', flexWrap:'wrap', gap:6, alignContent:'flex-start' }}>
-          {staples.map(s => (
-            <div key={s} className="pill pill-on" onClick={() => remove(s)} style={{ cursor:'pointer' }}>
-              {s} <span style={{ marginLeft:4, opacity:0.7 }}>×</span>
+          {staples.map(s => (editing === s ? (
+            <input
+              key={s}
+              className="pill pill-on"
+              autoFocus
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') commitEdit();
+                if (e.key === 'Escape') cancelEdit();
+              }}
+              onBlur={commitEdit}
+              /* Staples are stored lowercase for matching, so let the keyboard
+                 type lowercase too — otherwise iOS capitalises the first
+                 letter and saving appears to undo it. Autocorrect is left
+                 alone: these are ordinary words and should be corrected. */
+              autoCapitalize="none"
+              style={{
+                width: `${Math.max(6, draft.length + 2)}ch`, minWidth:'6ch', maxWidth:'100%',
+                outline:'none', caretColor:'var(--purple-light)',
+              }}
+            />
+          ) : (
+            <div key={s} className="pill pill-on" style={{ paddingRight:4 }}>
+              {/* Two targets in one pill: the words edit, the × deletes. */}
+              <span onClick={() => startEdit(s)} style={{ cursor:'text', padding:'2px 0' }}>{s}</span>
+              <span
+                onClick={() => remove(s)}
+                title={`Remove ${s}`}
+                style={{ marginLeft:6, opacity:0.7, cursor:'pointer', padding:'2px 7px', lineHeight:1 }}
+              >×</span>
             </div>
-          ))}
+          )))}
           {staples.length === 0 && (
             <div style={{ color:'var(--text-dimmer)', fontSize:16 }}>No staples yet — add some above.</div>
           )}
