@@ -2992,6 +2992,213 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
 }
 
 /* ═══════════════════════════════════════════
+   RE-PLAN AROUND WHAT'S ALREADY IN THE FRIDGE
+
+   The plan is already written and the shopping already happened — just not
+   the shopping that was asked for. So this is not a fresh pick: it reads the
+   week off the calendar, swaps the fewest dinners that will use up what came
+   home, and leaves everything else exactly where it was.
+═══════════════════════════════════════════ */
+
+/* Read the dinners already on the calendar for a plan week, in the shape the
+   preview modal and applyPlan expect. Days with no dinner are skipped: there
+   is nothing to swap on a day that was never planned. */
+function readPlannedDays({ weekMap, recipeDB, planOffset }) {
+  const byName = {};
+  (recipeDB || []).forEach(r => { if (r && r.name) byName[r.name.toLowerCase()] = r; });
+  const look = (n) => byName[String(n || '').toLowerCase()] || null;
+  return buildPlanDays(planOffset).map(day => {
+    const week = weekMap && weekMap[day.weekOffset];
+    const slot = week && week[day.slotIdx];
+    if (!slot || !slot.meals || !slot.meals.d) return null;
+    const bfNames = Array.isArray(slot.meals.b) ? slot.meals.b : (slot.meals.b ? [slot.meals.b] : []);
+    const breakfasts = bfNames.map(look).filter(Boolean);
+    const dayTasks = [...(slot.tasks || [])];
+    return {
+      ...day,
+      on: true,
+      // A dinner whose recipe has since been deleted still holds the slot, so
+      // keep a stub rather than dropping the day out of the plan entirely.
+      dinner: look(slot.meals.d) || { name: slot.meals.d, ingredients: [], ingredientsWithQty: [] },
+      breakfast: breakfasts[0] || null,
+      breakfasts,
+      tasks: dayTasks,
+      tier: effortTierFor(breakfasts, dayTasks),
+    };
+  }).filter(Boolean);
+}
+
+/* Which words in a free-text haul name food. Used by the rule-based fallback
+   to score recipes; the LLM path gets the raw sentence and does better. */
+const HAVE_STOP = new Set([
+  'a','an','the','and','or','of','with','for','some','lots','lot','bunch','pack','packs',
+  'bag','bags','box','boxes','can','cans','jar','jars','lb','lbs','pound','pounds','oz',
+  'ounce','ounces','kg','g','gram','grams','got','bought','have','has','he','she','they',
+  'my','husband','wife','random','instead','extra','big','small','fresh','from','store',
+  'came','home','with','also','plus','couple','few','more','this','that','these','those',
+  'is','are','was','were','it','its','i','we','us','on','in','at','to','put','fridge',
+  'freezer','picked','up','something','things','stuff','item','items','grocery','groceries',
+]);
+function haveTokens(text) {
+  return [...new Set(String(text || '').toLowerCase()
+    .split(/[^a-z]+/)
+    .filter(w => w.length > 2 && !HAVE_STOP.has(w))
+    .map(singularizeWord))];
+}
+
+/* How well a recipe uses up a haul. Counts DISTINCT have-words that show up in
+   the recipe's ingredients, so a recipe using beef and peppers beats one that
+   merely says "beef" three times. */
+function haveScore(recipe, tokens) {
+  if (!recipe || !tokens.length) return 0;
+  const hay = ((recipe.ingredients || []).join(' ') + ' ' + (recipe.name || '')).toLowerCase();
+  let n = 0;
+  for (const t of tokens) if (hay.includes(t)) n++;
+  return n;
+}
+
+/* Rule-based fallback for the swap, used when there is no API key or the model
+   call fails. Swaps the planned dinners that use the haul LEAST for library
+   recipes that use it MOST, one day at a time, respecting the day's effort
+   tier and never introducing a duplicate. */
+function swapPlanForHavesLocal({ recipeDB, plan, haves, pastaCap }) {
+  const tokens = haveTokens(haves);
+  const result = plan.map(p => ({ ...p }));
+  if (!tokens.length) return { plan: result, changed: [], haveIngredients: [] };
+
+  const planned = new Set(result.map(p => p.dinner && p.dinner.name).filter(Boolean));
+  const candidates = (recipeDB || [])
+    .filter(r => r && isAutoplanEligible(r) && !planned.has(r.name))
+    .map(r => ({ r, score: haveScore(r, tokens) }))
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+  if (!candidates.length) return { plan: result, changed: [], haveIngredients: tokens };
+
+  // Weakest current fit goes first — a day already cooking the haul stays put.
+  const order = result
+    .map((p, i) => ({ i, score: haveScore(p.dinner, tokens) }))
+    .sort((a, b) => a.score - b.score);
+
+  const changed = [];
+  const used = new Set(planned);
+  let pastaCount = result.filter(p => isPastaDish(p.dinner)).length;
+  // Hard ceiling on how much of the week this may rewrite. Without it a haul
+  // whose words appear loosely across the library swaps every single day —
+  // the opposite of the point, which is to absorb a shop, not replan the week.
+  // A haul is a handful of items; two or three dinners will use it up.
+  const maxSwaps = Math.max(1, Math.min(3, Math.floor(plan.length / 2)));
+  for (const { i, score } of order) {
+    if (changed.length >= maxSwaps) break;
+    const slot = result[i];
+    const pick = candidates.find(c =>
+      !used.has(c.r.name) &&
+      c.score > score &&
+      tierAllowsComplexity(slot.tier || 'free', c.r.complexity) &&
+      !(isPastaDish(c.r) && !isPastaDish(slot.dinner) && pastaCount >= pastaCap));
+    if (!pick) continue;
+    if (isPastaDish(slot.dinner) && !isPastaDish(pick.r)) pastaCount--;
+    if (!isPastaDish(slot.dinner) && isPastaDish(pick.r)) pastaCount++;
+    used.delete(slot.dinner && slot.dinner.name);
+    used.add(pick.r.name);
+    changed.push({ dt: slot.dt, from: slot.dinner && slot.dinner.name, to: pick.r.name });
+    result[i] = { ...slot, dinner: pick.r };
+    // Stop early once the plan already covers every word of the haul — a
+    // single package of mince should cost one swap, not the ceiling.
+    const covered = new Set();
+    result.forEach(p => tokens.forEach(t => { if (haveScore(p.dinner, [t])) covered.add(t); }));
+    if (covered.size >= tokens.length) break;
+  }
+  return { plan: result, changed, haveIngredients: tokens };
+}
+
+const REPLAN_SYSTEM = `You adjust an ALREADY-WRITTEN week of dinners after the shopping came home wrong.
+
+You are given the dinners currently on the calendar, a free-text description of what the user actually has, and the recipe library. Swap the FEWEST dinners that will use up what they have.
+
+Rules:
+(1) CHANGE AS LITTLE AS POSSIBLE. A dinner that already uses what they have STAYS. Only swap a day when doing so puts the new ingredients to use. Most hauls need one or two swaps, not a new week.
+(2) Every day in CURRENT PLAN must appear exactly once in your picks, whether or not you changed it. Set "changed": false for the ones you left alone and repeat the existing dinnerName.
+(3) dinnerName must be copied EXACTLY from the library, or be the day's existing dinner. Never invent a recipe.
+(4) TIER is a hard gate on how involved the replacement may be:
+    - "breakfast" → the replacement must be complexity Light
+    - "task" → Light or Medium
+    - "free" → Medium or Heavy, never Light
+(5) No dinner may appear twice in the plan.
+(6) PASTA_MAX is a hard maximum on how many dinners in the finished plan may have "isPasta": true.
+(7) Prefer swaps that use PERISHABLE items first — fresh meat and fish spoil, dried goods keep.
+(8) Also return "haveIngredients": the things the user said they have, as plain shopping names, lowercase, one item per entry ("ground beef", "red peppers", "sour cream"). Normalise them to how they would be written on a grocery list — drop quantities, brands and packaging. These get crossed off the shopping list, so include everything they mentioned having, whether or not a recipe uses it.
+
+Return ONLY JSON, no prose, no markdown:
+{
+  "haveIngredients": ["<shopping name>", ...],
+  "picks": [ { "dt": "<dt from CURRENT PLAN>", "dinnerName": "<exact library name>", "changed": true|false, "reason": "<short, only when changed>" } ]
+}`;
+
+async function swapPlanForHavesWithLLM({ apiKey, recipeDB, plan, haves, pastaCap }) {
+  const planned = new Set(plan.map(p => p.dinner && p.dinner.name).filter(Boolean));
+  const slim = (recipeDB || [])
+    .filter(r => r && isAutoplanEligible(r) && !planned.has(r.name))
+    .map(r => ({
+      name: r.name,
+      tags: (r.tags || []).filter(t => t !== 'dinner'),
+      complexity: r.complexity || 'Medium',
+      isPasta: isPastaDish(r),
+      // The model needs to see what a recipe would consume to judge a swap.
+      ingredients: (r.ingredients || []).slice(0, 14),
+    }));
+  const current = plan.map(p => ({
+    dt: p.dt,
+    weekday: p.d,
+    tier: p.tier || 'free',
+    dinnerName: p.dinner ? p.dinner.name : null,
+    dinnerIngredients: (p.dinner && p.dinner.ingredients) ? p.dinner.ingredients.slice(0, 14) : [],
+  }));
+
+  const user = `WHAT I ACTUALLY HAVE:\n"""${haves}"""\n\nCURRENT PLAN (every dt must come back in your picks):\n${JSON.stringify(current, null, 2)}\n\nPASTA_MAX (hard maximum, counting dinners with "isPasta": true):\n${pastaCap}\n\nRECIPE LIBRARY (dinners not already in the plan):\n${JSON.stringify(slim, null, 2)}`;
+
+  const text = await callClaude({ apiKey, system: REPLAN_SYSTEM, user, thinking: NO_THINKING, maxTokens: 8192 });
+  const parsed = extractJson(text);
+  if (!parsed || !Array.isArray(parsed.picks)) throw new Error('Bad re-plan response shape');
+
+  const byName = {};
+  (recipeDB || []).forEach(r => { if (r && r.name) byName[r.name.toLowerCase()] = r; });
+  const pickByDt = {};
+  parsed.picks.forEach(p => { if (p && p.dt) pickByDt[p.dt] = p; });
+
+  const changed = [];
+  const used = new Set();
+  const result = plan.map(slot => {
+    const pick = pickByDt[slot.dt];
+    const wanted = pick && pick.dinnerName ? byName[String(pick.dinnerName).toLowerCase()] : null;
+    // Anything unrecognised, duplicated, or barred by the day's tier falls
+    // back to the dinner that was already there — the safe answer, since the
+    // point of this flow is to change as little as possible.
+    if (!wanted
+      || wanted.name === (slot.dinner && slot.dinner.name)
+      || used.has(wanted.name)
+      || !tierAllowsComplexity(slot.tier || 'free', wanted.complexity)) {
+      if (slot.dinner && slot.dinner.name) used.add(slot.dinner.name);
+      return { ...slot };
+    }
+    used.add(wanted.name);
+    changed.push({ dt: slot.dt, from: slot.dinner && slot.dinner.name, to: wanted.name, reason: pick.reason || '' });
+    return { ...slot, dinner: wanted };
+  });
+
+  enforcePastaCap({
+    result, cap: pastaCap,
+    candidates: (recipeDB || []).filter(isAutoplanEligible),
+    usedThisRun: used,
+    tierOf: (s) => s.tier || 'free',
+  });
+
+  const haveIngredients = Array.isArray(parsed.haveIngredients)
+    ? parsed.haveIngredients.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim().toLowerCase())
+    : haveTokens(haves);
+  return { plan: result, changed, haveIngredients };
+}
+
+/* ═══════════════════════════════════════════
    DATA
 ═══════════════════════════════════════════ */
 const TODAY_IDX = 3; // Wednesday
@@ -3620,6 +3827,47 @@ function RecipePhotoSheet({ recipe, onApply, onClose }) {
             style={{ flex:2, opacity: url.trim() ? 1 : 0.5 }}
             onClick={url.trim() ? useUrl : undefined}
           >Use this photo</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Describe what actually came home, and re-plan the week around it. */
+function UseWhatIHaveSheet({ weekTitle, plannedCount, busy, onRun, onClose }) {
+  const [text, setText] = useState('');
+  const ready = text.trim().length > 1 && plannedCount > 0;
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()}>
+        <div className="modal-grabber" />
+        <div className="modal-header">
+          <div className="modal-title">What do you actually have?</div>
+          <span className="modal-close" onClick={busy ? undefined : onClose}>×</span>
+        </div>
+        <div style={{ fontSize:15, color:'var(--text-dimmer)', marginBottom:10, lineHeight:1.5 }}>
+          {plannedCount > 0
+            ? <>Tell me what's in the fridge and I'll swap the fewest dinners in <b>{weekTitle}</b> that use it up, then take those things off your shopping list.</>
+            : <>There are no dinners planned in <b>{weekTitle}</b> yet — generate a plan first, then come back here to adjust it.</>}
+        </div>
+        <textarea
+          className="text-input"
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder={'e.g. "2 lbs ground beef, a pack of pork chops, bag of red peppers and some sour cream"'}
+          style={{ minHeight:110, lineHeight:1.5, marginBottom:4 }}
+          disabled={busy || plannedCount === 0}
+        />
+        <div style={{ fontSize:13, color:'var(--text-dimmer)', marginBottom:4 }}>
+          {plannedCount} dinner{plannedCount === 1 ? '' : 's'} currently planned. Everything that already
+          works with what you have stays put.
+        </div>
+        <div className="btn-wrap" style={{ padding:'14px 0 4px' }}>
+          <div
+            className="gen-btn"
+            style={ready && !busy ? null : { opacity:0.5, cursor: busy ? 'wait' : 'default' }}
+            onClick={ready && !busy ? () => onRun(text.trim()) : undefined}
+          >{busy ? '⏳ Reworking your week…' : '✦ Update my plan'}</div>
         </div>
       </div>
     </div>
@@ -4594,7 +4842,7 @@ function RecipePeekSheet({ recipe, onClose }) {
    to the existing-meals overwrite/append flow (or directly applies the
    plan if no day conflicts). Recipe rows are tappable → opens RecipePeekSheet
    layered on top so the user can inspect a dish before confirming/rerolling. ── */
-function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed }) {
+function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed, swapped }) {
   // Lookup table from weekOffset+slotIdx → friendly day chip ({ label, n, month, d })
   const dayInfoFor = (weekOffset, slotIdx) => {
     const wk = weekMap && weekMap[weekOffset];
@@ -4737,9 +4985,27 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
           }}>🌙 {drag.name}</div>
         )}
         <div ref={scrollRef} style={{ overflowY:'auto', overflowX:'hidden', flex:1, paddingRight:2 }}>
-          <div style={{ fontSize:15, color:'var(--text-dimmer)', marginBottom:8 }}>
-            Here's what I picked. Review before I write it to your week.
-          </div>
+          {swapped ? (
+            <div style={{
+              fontSize:15, color:'#ddd', marginBottom:10, lineHeight:1.55,
+              background:'var(--purple-mid)', border:'1.5px solid var(--purple)',
+              borderRadius:10, padding:'9px 12px',
+            }}>
+              <div style={{ marginBottom: swapped.length ? 5 : 0 }}>
+                Swapped {swapped.length} dinner{swapped.length === 1 ? '' : 's'} to use what you have.
+                The rest of the week is unchanged.
+              </div>
+              {swapped.map((c, i) => (
+                <div key={i} style={{ fontSize:14, color:'var(--purple-light)' }}>
+                  {c.dt}: <span style={{ textDecoration:'line-through', opacity:0.65 }}>{c.from}</span> → {c.to}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize:15, color:'var(--text-dimmer)', marginBottom:8 }}>
+              Here's what I picked. Review before I write it to your week.
+            </div>
+          )}
           <div style={{ display:'flex', flexDirection:'column', gap:6, marginBottom:14 }}>
             {ordered.map(({ weekOffset, slotIdx, dt, dinner, breakfast, breakfasts, tasks: dayTasks }) => {
               const info = dayInfoFor(weekOffset, slotIdx);
@@ -4907,9 +5173,12 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
         </div>
 
         <div style={{ display:'flex', gap:8, padding:'12px 0 4px' }}>
+          {/* No reroll on a re-plan: it re-runs the Auto-Plan settings from
+              scratch, which would discard the swap the user just asked for. */}
+          {onReroll && (
           <div
             className="gen-btn"
-            onClick={(rerolling || !onReroll) ? undefined : () => onReroll(keptKeys)}
+            onClick={rerolling ? undefined : () => onReroll(keptKeys)}
             style={
               rerolling
                 ? { flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)', opacity:0.6, cursor:'wait' }
@@ -4925,12 +5194,13 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                 ? `🎲 Reroll others (keep ${keptKeys.size})`
                 : `🎲 Reroll${rerollSeed != null ? ` (#${rerollSeed + 1})` : ''}`}
           </div>
+          )}
           <div
             className="gen-btn"
             onClick={rerolling ? undefined : confirm}
             style={rerolling ? { flex:1, opacity:0.6, cursor:'wait' } : { flex:1 }}
           >
-            Confirm
+            {swapped ? 'Update my week' : 'Confirm'}
           </div>
         </div>
       </div>
@@ -7252,6 +7522,13 @@ function AutoPlanScreen({
     setTaskModal(null);
   };
 
+  // Re-plan-around-what-I-have flow. haveNames carries the shopping names
+  // through the preview to applyPlan, so confirming also clears them off the
+  // grocery list rather than only swapping the dinners.
+  const [haveSheet, setHaveSheet] = useState(false);
+  const [haveBusy, setHaveBusy] = useState(false);
+  const [haveNames, setHaveNames] = useState([]);
+
   const [instructions, setInstructions] = usePersistedState('ab.autoplan.instructions.v2', 'Have chicken two nights');
   const [avoidIdx, setAvoidIdx] = usePersistedState('ab.autoplan.avoidIdx', 2);
   const stepAvoid = (delta) => setAvoidIdx(prev => Math.max(0, Math.min(AVOID_OPTS.length - 1, prev + delta)));
@@ -7298,6 +7575,25 @@ function AutoPlanScreen({
   // confirm in PreviewPlanModal when the user unchecks a staple.
   const applyPlan = async (perDay, mode, opts = {}) => {
     const excludedStaples = opts.excludedStaples instanceof Set ? opts.excludedStaples : new Set();
+    // alreadyHave: shopping names the user says are already in the kitchen
+    // (the re-plan flow passes what the shopping actually brought home).
+    // Matched on the canonical grocery key so "peppers" catches "red pepper",
+    // the same normalisation the list itself merges on.
+    const haveKeys = new Set(
+      (opts.alreadyHave || []).map(n => groceryKey(n)).filter(Boolean));
+    const alreadyHave = (ing) => {
+      if (!haveKeys.size) return false;
+      const k = groceryKey(ing);
+      if (!k) return false;
+      if (haveKeys.has(k)) return true;
+      // "ground beef" on hand covers a recipe asking for "lean ground beef",
+      // and vice versa — one is a qualified form of the other.
+      for (const h of haveKeys) {
+        if (k === h) return true;
+        if (k.endsWith(' ' + h) || h.endsWith(' ' + k)) return true;
+      }
+      return false;
+    };
     // 1. Write meals + tasks per day, grouped by weekOffset
     // Track which dinners/breakfasts were actually written so we only
     // aggregate groceries for meals that landed.
@@ -7372,6 +7668,7 @@ function AutoPlanScreen({
     };
     const aggregated = {}; // key=groceryKey(name) → { name, contribs:[], srcs:Set }
     const missingIngredients = []; // diagnostic — recipes the picker chose but we couldn't aggregate
+    let haveSkipped = 0;
     written.forEach(({ dt, recipe }) => {
       const ings = recipe.ingredients || [];
       const qtys = Array.isArray(recipe.ingredientsWithQty) ? recipe.ingredientsWithQty : [];
@@ -7383,6 +7680,8 @@ function AutoPlanScreen({
       }
       ings.forEach((ing, i) => {
         if (!ing || isPantry(ing)) return;
+        // Already in the kitchen — no point putting it back on the list.
+        if (alreadyHave(ing)) { haveSkipped++; return; }
         // Canonical key so "carrot" from one recipe and "carrots" from
         // another aggregate into a single line whose portions add up.
         const key = groceryKey(ing);
@@ -7498,6 +7797,15 @@ function AutoPlanScreen({
         return { ...it, src: keptSrcs.join(' + '), q: '' };
       })
       .filter(it => it !== null);
+    // 3c. Anything already in the kitchen comes off the list, including rows
+    //     put there by a day that wasn't rewritten. Buying it again is exactly
+    //     what this flow exists to prevent, so this ignores `edited` and
+    //     manual entries — the user has just said, in words, that they have it.
+    if (haveKeys.size) {
+      const before = nextList.length;
+      nextList = nextList.filter(it => !alreadyHave(it.n));
+      haveSkipped += before - nextList.length;
+    }
     const indexByName = {};
     nextList.forEach((it, i) => { itemKeys(it).forEach(k => { indexByName[k] = i; }); });
     let added = 0, merged = 0;
@@ -7630,6 +7938,7 @@ function AutoPlanScreen({
       if (added)    parts.push(`${added} new grocery item${added === 1 ? '' : 's'}`);
       if (merged)   parts.push(`${merged} merged`);
       if (prunedStaples) parts.push(`${prunedStaples} staple${prunedStaples === 1 ? '' : 's'} skipped`);
+      if (haveSkipped) parts.push(`${haveSkipped} you already have`);
       setGenStatus(`✓ ${parts.join(' · ')}`);
     }
     setTimeout(() => setGenStatus(''), 6000);
@@ -7707,6 +8016,48 @@ function AutoPlanScreen({
     return merged.length > RECENT_DINNERS_CAP
       ? merged.slice(merged.length - RECENT_DINNERS_CAP)
       : merged;
+  };
+
+  // Dinners already on the calendar for the week being viewed. Recomputed on
+  // render so the "N dinners planned" line can't go stale after a confirm.
+  const plannedDays = readPlannedDays({ weekMap, recipeDB, planOffset });
+
+  const runUseWhatIHave = async (haves) => {
+    setHaveBusy(true);
+    setGenStatus('');
+    const pastaCap = pastaCapFrom(parseProteinConstraints(instructions));
+    let out = null;
+    let note = '';
+    if (apiKey) {
+      try {
+        out = await swapPlanForHavesWithLLM({ apiKey, recipeDB, plan: plannedDays, haves, pastaCap });
+      } catch (e) {
+        note = `Claude couldn't rework it (${e.message}) — matched on ingredients instead`;
+      }
+    } else {
+      note = 'No API key — matched what you have against recipe ingredients';
+    }
+    if (!out) out = swapPlanForHavesLocal({ recipeDB, plan: plannedDays, haves, pastaCap });
+    setHaveBusy(false);
+    setHaveSheet(false);
+
+    if (!out.changed.length) {
+      // Nothing to swap is a real answer, not a failure: the week may already
+      // cook what came home. Say so instead of opening an unchanged preview.
+      setGenStatus(note
+        ? `${note} · nothing needed swapping`
+        : '✓ Your plan already uses what you have — nothing to swap');
+      setHaveNames(out.haveIngredients || []);
+      setTimeout(() => setGenStatus(''), 6000);
+      return;
+    }
+    setHaveNames(out.haveIngredients || []);
+    if (note) { setGenStatus(note); setTimeout(() => setGenStatus(''), 6000); }
+    setPreviewModal({
+      perDay: out.plan,
+      weekTitle: planWeekTitle(planOffset),
+      swapped: out.changed,
+    });
   };
 
   const handleGenerate = async () => {
@@ -7844,7 +8195,16 @@ function AutoPlanScreen({
 
   const confirmPreview = (excludedStaples) => {
     if (!previewModal) return;
-    const { perDay } = previewModal;
+    const { perDay, swapped } = previewModal;
+    // A re-plan is always an overwrite of days that are already written — that
+    // is the whole point — so it skips the "these days already have meals,
+    // replace or keep?" question, which would only ever have one sane answer.
+    if (swapped) {
+      setPreviewModal(null);
+      applyPlan(perDay, 'overwrite', { excludedStaples, alreadyHave: haveNames });
+      setHaveNames([]);
+      return;
+    }
     let existing = 0;
     perDay.forEach(({ weekOffset, slotIdx }) => {
       const slot = weekMap[weekOffset] && weekMap[weekOffset][slotIdx];
@@ -7971,6 +8331,25 @@ function AutoPlanScreen({
             </div>
           </div>
         </div>
+        {/* Re-plan around an unplanned shop. Sits with the other cards rather
+            than in the button bar: it acts on the week already written, not on
+            the settings above, and it should not compete with Generate. */}
+        <div
+          className="card"
+          onClick={() => setHaveSheet(true)}
+          style={{ marginBottom:14, cursor:'pointer', display:'flex', alignItems:'center', gap:12 }}
+        >
+          <span style={{ fontSize:27 }}>🛒</span>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:19, color:'#ddd' }}>Bought something else?</div>
+            <div style={{ fontSize:14, color:'var(--text-dimmer)', lineHeight:1.4 }}>
+              {plannedDays.length
+                ? `Rework ${planWeekTitle(planOffset)}'s ${plannedDays.length} dinner${plannedDays.length === 1 ? '' : 's'} around what's in the fridge`
+                : `No dinners planned in ${planWeekTitle(planOffset)} yet`}
+            </div>
+          </div>
+          <span style={{ fontSize:21, color:'var(--purple)' }}>›</span>
+        </div>
       </div>
 
       <div className="btn-wrap">
@@ -7994,6 +8373,16 @@ function AutoPlanScreen({
         </div>
       </div>
 
+      {haveSheet && (
+        <UseWhatIHaveSheet
+          weekTitle={planWeekTitle(planOffset)}
+          plannedCount={plannedDays.length}
+          busy={haveBusy}
+          onRun={runUseWhatIHave}
+          onClose={() => setHaveSheet(false)}
+        />
+      )}
+
       {taskModal && (
         <TaskSheet
           initial={taskModal.idx != null ? tasks[taskModal.idx].name : ''}
@@ -8010,10 +8399,13 @@ function AutoPlanScreen({
           pantryStaples={pantryStaples}
           onConfirm={confirmPreview}
           onCancel={() => setPreviewModal(null)}
-          onReroll={handleReroll}
+          /* Reroll re-runs the Auto-Plan settings from scratch, which would
+             throw away the swap — so it is not offered on a re-plan. */
+          onReroll={previewModal.swapped ? null : handleReroll}
           onMoveDinner={movePreviewDinner}
           rerolling={genLoading}
           rerollSeed={rerollSeed}
+          swapped={previewModal.swapped}
         />
       )}
 

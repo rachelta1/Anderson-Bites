@@ -184,6 +184,14 @@ The biggest sub-section and the most interesting. Three parts:
   rules to apply (preserve qty verbatim, copy steps verbatim,
   classify complexity, pick the right tags).
 - **`callClaude`** (line ~1196): the actual API call to Anthropic.
+- **Re-plan around what's on hand** (`readPlannedDays`,
+  `swapPlanForHavesWithLLM`, `swapPlanForHavesLocal`): the "Bought
+  something else?" card on Auto-Plan. Reads the dinners already on the
+  calendar, swaps the fewest that will use up what actually came home,
+  and passes those shopping names to `applyPlan` as `alreadyHave` so
+  they come off the grocery list too. Deliberately conservative: the
+  rule-based path will not change more than three dinners, since the
+  job is absorbing a shop, not replanning the week.
 - **Autoplan logic** (lines ~1500–2250): two pickers that decide
   which dinner goes on which day. **`pickPlanWithLLM`** asks Claude
   for picks and validates them against the day's tier. **`pickPlan`**
