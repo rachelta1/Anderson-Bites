@@ -4036,12 +4036,16 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
       else draft.meals.snacks.push(recipeName);
     } else if (mealType === 'snack') {
       draft.meals.snacks.push(recipeName);
+    } else if (mealType === 'task') {
+      // Same day twice is a no-op rather than a duplicate chore.
+      if (!draft.tasks.includes(recipeName)) draft.tasks.push(recipeName);
     }
   };
   const removeFromDay = (draft, mealType, slot) => {
     if (mealType === 'b') draft.meals.b.splice(slot.idx, 1);
     else if (mealType === 'd') draft.meals.d = null;
     else if (mealType === 'snack') draft.meals.snacks.splice(slot, 1);
+    else if (mealType === 'task') draft.tasks.splice(slot.idx, 1);
     if (!dayHasContent(draft)) draft.planned = false;
   };
 
@@ -4051,7 +4055,9 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
     if (!sourceDay) { setModal(null); return; }
     const srcB = Array.isArray(sourceDay.meals.b) ? sourceDay.meals.b : [];
     let recipeName, mealType;
-    if (slot && typeof slot === 'object' && slot.kind === 'b') {
+    if (slot && typeof slot === 'object' && slot.kind === 'task') {
+      recipeName = (sourceDay.tasks || [])[slot.idx]; mealType = 'task';
+    } else if (slot && typeof slot === 'object' && slot.kind === 'b') {
       recipeName = srcB[slot.idx]; mealType = 'b';
     } else if (slot === 'd') {
       recipeName = sourceDay.meals.d; mealType = 'd';
@@ -4221,7 +4227,12 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
                 <div className="meal-slot-name">{parsed.name}</div>
                 <div className="meal-slot-meta">Household task</div>
               </div>
-              <span className="meal-slot-edit">✎</span>
+              <span className="meal-slot-edit" title="rename">✎</span>
+              <span
+                className="meal-slot-move"
+                title="move to another day"
+                onClick={(e) => { e.stopPropagation(); openMove({ kind:'task', idx:i }, parsed.name); }}
+              >📅</span>
               <span className="meal-slot-del" onClick={(e) => { e.stopPropagation(); deleteTask(i); }}>×</span>
             </div>
           );
@@ -4468,6 +4479,28 @@ const CUT_FORMS = new Set([
   'wedge','slice','half','piece','chunk','strip','floret','spear','sprig',
   'leaf','clove','stalk','stick','round','ribbon','segment','fillet',
 ]);
+/* The date a grocery row came from, out of a src segment like
+   "Aug 26 · Baked Ziti" or the older "Mon Aug 26 · Baked Ziti". Returns a
+   timestamp at local midnight, or null when the segment carries no date
+   (a manual add, or a legacy recipe-name-only source). Shared so the weekly
+   sweep and applyPlan's stale cleanup agree on what "past" means. */
+const SRC_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function parseSrcDate(segment) {
+  const datePart = String(segment || '').split(' \u00b7 ')[0].trim();
+  const m = datePart.match(/(?:^|\s)([A-Z][a-z]{2})\s+(\d{1,2})(?:\s|$)/);
+  if (!m) return null;
+  const monthIdx = SRC_MONTHS.indexOf(m[1]);
+  if (monthIdx < 0) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  // Assume this year; if that lands far in the future it was last year
+  // (the Dec→Jan boundary).
+  let candidate = new Date(today.getFullYear(), monthIdx, parseInt(m[2], 10));
+  if (candidate.getTime() - today.getTime() > 180 * 24 * 3600 * 1000) {
+    candidate = new Date(today.getFullYear() - 1, monthIdx, parseInt(m[2], 10));
+  }
+  return candidate.getTime();
+}
+
 function groceryKey(name) {
   const original = String(name || '').trim().toLowerCase();
   if (!original) return '';
@@ -4978,7 +5011,7 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
             </div>
           )}
           <div style={{ display:'flex', flexDirection:'column', gap:6, marginBottom:14 }}>
-            {ordered.map(({ weekOffset, slotIdx, dt, dinner, breakfast, breakfasts, tasks: dayTasks }) => {
+            {ordered.map(({ weekOffset, slotIdx, dt, dinner, extras, breakfast, breakfasts, tasks: dayTasks }) => {
               const info = dayInfoFor(weekOffset, slotIdx);
               const dayLabel = info ? `${info.label} ${info.month} ${info.n}` : dt;
               const bfList = (Array.isArray(breakfasts) && breakfasts.length)
@@ -5068,12 +5101,29 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                       </div>
                     );
                   })()}
+                  {/* A second dinner dropped onto this day. Shown under the
+                      first so it is obvious the day now holds both, rather
+                      than the drop having replaced what was there. */}
+                  {(extras || []).map((x, i) => (
+                    <div
+                      key={`x-${i}`}
+                      onClick={isPeekable(x) ? () => setPeeked(x) : undefined}
+                      style={{ fontSize:16, color:'#ddd', display:'flex', gap:6, alignItems:'center',
+                               cursor: isPeekable(x) ? 'pointer' : 'default', padding:'2px 0' }}
+                    >
+                      <span style={{ width:14 }}>🌙</span>
+                      <span style={{ flex:1, textDecoration: isPeekable(x) ? 'underline dotted var(--purple-bg)' : 'none', textUnderlineOffset:'3px' }}>
+                        {x.name} <span style={{ fontSize:13, color:'var(--purple-light)' }}>also</span>
+                      </span>
+                      {isPeekable(x) && <span style={{ color:'var(--text-dimmer)', fontSize:15 }}>›</span>}
+                    </div>
+                  ))}
                   {(dayTasks || []).map((t, i) => (
                     <div key={`t-${i}`} style={{ fontSize:15, color:'var(--text-dim)', display:'flex', gap:6 }}>
                       <span style={{ width:14 }}>✓</span><span>{t}</span>
                     </div>
                   ))}
-                  {!bfList.length && !dinner && !(dayTasks && dayTasks.length) && (
+                  {!bfList.length && !dinner && !(extras || []).length && !(dayTasks && dayTasks.length) && (
                     <div style={{ fontSize:15, color:'var(--text-dimmer)', fontStyle:'italic' }}>(nothing chosen for this day)</div>
                   )}
                 </div>
@@ -7575,7 +7625,8 @@ function AutoPlanScreen({
     // aggregate groceries for meals that landed.
     const written = []; // { dt, recipe }
     const updatedWeeks = { ...weekMap };
-    perDay.forEach(({ weekOffset, slotIdx, dt, dinner, breakfast, breakfasts, tasks: dayTasks }) => {
+    perDay.forEach(({ weekOffset, slotIdx, dt, dinner, extras, breakfast, breakfasts, tasks: dayTasks }) => {
+      const extraList = Array.isArray(extras) ? extras.filter(Boolean) : [];
       const week = updatedWeeks[weekOffset]
         ? updatedWeeks[weekOffset].map(s => ({ ...s, meals: { ...s.meals }, tasks: [...(s.tasks || [])] }))
         : buildWeek(weekOffset);
@@ -7596,12 +7647,26 @@ function AutoPlanScreen({
         // the user wants gone) is cleared. Same for dinner. Tasks already
         // worked correctly since they always replaced.
         slot.meals.d = dinner ? dinner.name : null;
+        // A second dinner moved onto this day rides along as an extra, the
+        // same shape the week view already uses for a day with two meals.
+        if (extraList.length) {
+          slot.meals.snacks = [
+            ...(slot.meals.snacks || []).filter(n => !extraList.some(e => e.name === n)),
+            ...extraList.map(e => e.name),
+          ];
+        }
         slot.meals.b = bfNames; // string[] — empty array clears the breakfast row
         slot.tasks = [...dayTasks];
         if (dinner) written.push({ dt, recipe: dinner });
+        extraList.forEach(e => written.push({ dt, recipe: e }));
         bfList.forEach(b => written.push({ dt, recipe: b }));
       } else { // append
         if (dinner && !slot.meals.d) { slot.meals.d = dinner.name; written.push({ dt, recipe: dinner }); }
+        extraList.forEach(e => {
+          if (slot.meals.d === e.name || (slot.meals.snacks || []).includes(e.name)) return;
+          slot.meals.snacks = [...(slot.meals.snacks || []), e.name];
+          written.push({ dt, recipe: e });
+        });
         if (bfList.length && !existingB.length) {
           slot.meals.b = bfNames;
           bfList.forEach(b => written.push({ dt, recipe: b }));
@@ -7609,7 +7674,7 @@ function AutoPlanScreen({
         dayTasks.forEach(t => { if (!slot.tasks.includes(t)) slot.tasks.push(t); });
       }
       const finalB = Array.isArray(slot.meals.b) ? slot.meals.b : (slot.meals.b ? [slot.meals.b] : []);
-      const hasContent = !!(slot.meals.d || finalB.length || slot.tasks.length);
+      const hasContent = !!(slot.meals.d || finalB.length || (slot.meals.snacks || []).length || slot.tasks.length);
       // Append never removes content, so it can only flip planned ON.
       // Overwrite is full-replace — reflect emptiness too (rare: only if the
       // picker returned nothing and the user had no breakfasts/tasks set).
@@ -7742,21 +7807,9 @@ function AutoPlanScreen({
     //     Items left with an empty src after stripping are dropped.
     const _today = new Date();
     _today.setHours(0, 0, 0, 0);
-    const _MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const isStaleSrcSegment = (segment) => {
-      const datePart = (segment || '').split(' · ')[0].trim();
-      const m = datePart.match(/(?:^|\s)([A-Z][a-z]{2})\s+(\d{1,2})(?:\s|$)/);
-      if (!m) return false;
-      const monthIdx = _MONTHS_SHORT.indexOf(m[1]);
-      if (monthIdx < 0) return false;
-      const day = parseInt(m[2], 10);
-      // Year inference: assume current year. If that lands more than 180 days
-      // in the future, treat as last year (Dec→Jan boundary, etc.).
-      let candidate = new Date(_today.getFullYear(), monthIdx, day);
-      if (candidate.getTime() - _today.getTime() > 180 * 24 * 3600 * 1000) {
-        candidate = new Date(_today.getFullYear() - 1, monthIdx, day);
-      }
-      return candidate.getTime() < _today.getTime();
+      const t = parseSrcDate(segment);
+      return t !== null && t < _today.getTime();
     };
     nextList = nextList
       .map(it => {
@@ -7782,6 +7835,14 @@ function AutoPlanScreen({
       nextList = nextList.filter(it => !alreadyHave(it.n));
       haveSkipped += before - nextList.length;
     }
+    /* What was ticked off before this apply started. Rewriting a day drops any
+       row whose only source was that day, and re-aggregation then adds it back
+       as a brand-new, unticked row — so an item the user had already bought
+       reappeared on the list. Anything that comes back under the same key gets
+       its tick back. */
+    const wasDone = new Set();
+    groceryList.forEach(it => { if (it && it.done) itemKeys(it).forEach(k => wasDone.add(k)); });
+
     const indexByName = {};
     nextList.forEach((it, i) => { itemKeys(it).forEach(k => { indexByName[k] = i; }); });
     let added = 0, merged = 0;
@@ -7805,7 +7866,10 @@ function AutoPlanScreen({
         };
         merged++;
       } else {
-        nextList.push({ q: sumQtyStrings(contribs.map(c => c.q)), n: name, done: false, src: srcStr });
+        nextList.push({
+          q: sumQtyStrings(contribs.map(c => c.q)), n: name, src: srcStr,
+          done: wasDone.has(key),
+        });
         added++;
       }
     });
@@ -8153,14 +8217,25 @@ function AutoPlanScreen({
   // Swap semantics: if the target day already has a dinner they trade places,
   // so every selected day keeps a dinner. Breakfasts and tasks stay anchored
   // to their days (laundry Thursday stays Thursday).
+  /* Additive, not a swap. Dropping Friday's dinner onto Thursday used to send
+     Thursday's dinner back to Friday, which reads as the day you dropped onto
+     losing its meal. Now the target day keeps what it had and gains the moved
+     one as an extra; the day it came from is left empty. That matches the week
+     view, which already holds a second meal on a day as an extra. */
   const movePreviewDinner = (fromKey, toKey) => {
     setPreviewModal(prev => {
       if (!prev) return prev;
-      const perDay = prev.perDay.map(p => ({ ...p }));
-      const f = perDay.find(p => `${p.weekOffset}-${p.slotIdx}` === fromKey);
-      const t = perDay.find(p => `${p.weekOffset}-${p.slotIdx}` === toKey);
-      if (!f || !t) return prev;
-      const tmp = f.dinner; f.dinner = t.dinner; t.dinner = tmp;
+      const perDay = prev.perDay.map(p => ({ ...p, extras: [...(p.extras || [])] }));
+      const key = (p) => `${p.weekOffset}-${p.slotIdx}`;
+      const f = perDay.find(p => key(p) === fromKey);
+      const t = perDay.find(p => key(p) === toKey);
+      if (!f || !t || f === t || !f.dinner) return prev;
+      const moved = f.dinner;
+      // The source day gives up its dinner; if it was holding extras, the
+      // first of those steps up rather than leaving a hole.
+      f.dinner = f.extras.length ? f.extras.shift() : null;
+      if (!t.dinner) t.dinner = moved;
+      else t.extras.push(moved);
       return { ...prev, perDay };
     });
   };
@@ -8739,17 +8814,47 @@ function App() {
   const [recipesView, setRecipesView] = useState({ activeFilter: 'all', effortFilter: 'any', query: '' });
   const recipesScrollRef = useRef(0);
 
-  // Reset checked-off grocery items every Friday (local 00:00)
+  /* Adding something to the pantry takes it off the list straight away.
+     Before this, the staple filter only ran while a plan was being applied, so
+     marking an item as "I always have this" left it sitting on the list until
+     the next plan — it looked like the setting had done nothing, or worse,
+     like the item had come back. Manual adds and rows the user reworded are
+     left alone: those are deliberate, and a staple you specifically wrote down
+     is one you actually want to buy this time. */
+  useEffect(() => {
+    const classify = classifyPantry(pantryStaples);
+    setGroceryList(prev => {
+      const next = prev.filter(it => {
+        if (!it || /manual/i.test(it.src || '') || it.edited) return true;
+        if (isNeverStaple(it.n)) return true;
+        return !classify(it.n || '');
+      });
+      return next.length === prev.length ? prev : next;
+    });
+  }, [pantryStaples]);
+
+  /* Clear the previous shopping week every Friday (local 00:00).
+     Only items whose meals have all been and gone are dropped. A ticked item
+     that a STILL-PLANNED meal needs stays where it is: deleting it guarantees
+     the next plan re-adds it unticked, which reads as "I bought that, why is
+     it back on my list". Items with no dated source (added by hand) are never
+     swept — the user put them there and only they know when they're done. */
   useEffect(() => {
     const now = new Date();
     const daysSinceFri = (now.getDay() - 5 + 7) % 7;
     const fri = new Date(now);
     fri.setDate(fri.getDate() - daysSinceFri);
     fri.setHours(0, 0, 0, 0);
-    if (groceryLastReset < fri.getTime()) {
-      setGroceryList(prev => prev.filter(it => !it.done));
-      setGroceryLastReset(fri.getTime());
-    }
+    if (groceryLastReset >= fri.getTime()) return;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    setGroceryList(prev => prev.filter(it => {
+      if (!it.done) return true;
+      const segs = (it.src || '').split(' + ').map(s => s.trim()).filter(Boolean);
+      const dated = segs.map(s => parseSrcDate(s)).filter(Boolean);
+      if (!dated.length) return true;              // undated / manual → keep
+      return dated.some(d => d >= today.getTime()); // still coming → keep
+    }));
+    setGroceryLastReset(fri.getTime());
   }, []); // run once on mount
 
   // One-time migration: tag known side dishes with `sides` so they stop being
