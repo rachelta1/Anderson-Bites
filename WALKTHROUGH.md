@@ -163,6 +163,18 @@ from their general pool when nothing matches the tags, and they return
 it with a `200`, so the error-driven fallback never fired and the wrong
 picture stuck.
 
+#### 5b-ii. Renaming a recipe
+`renameRecipeEverywhere` (in `App`) exists because **the name is the
+reference**. The calendar stores dinners by name, so does cooking
+history, and every grocery row records which meal put it there. Editing
+only `recipeDB` would leave the week pointing at a recipe that no
+longer exists — the day keeps showing the old title but stops opening.
+The cascade covers `recipeDB`, `weekMap` (dinner, breakfasts, extras),
+`cookingHistory`, and the recipe half of every grocery `src` segment,
+plus the two auto-plan lists that hold bare names (`breakfastPicks`,
+`recentDinners`), which are patched in storage because AutoPlanScreen
+isn't mounted at the time.
+
 #### 5c. Effort + helpers (lines ~1032–1142)
 - `effortColor` / `effortLabel`: how "Light / Medium / Heavy"
   complexity is shown visually (green / amber / red).

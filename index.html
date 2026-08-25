@@ -3719,6 +3719,120 @@ function withTaskIcon(text) {
   return `📝 ${s}`;
 }
 
+/* Edit the recipe's identity — what it's called, how many it feeds, how long
+   it takes, where it came from, and its picture. Ingredients and steps have
+   their own editors on the recipe itself; this is everything else. */
+function RecipeEditSheet({ recipe, onSave, onPhoto, onClose }) {
+  const r = recipe || {};
+  const [name, setName] = useState(r.name || '');
+  const [servings, setServings] = useState(r.servings != null ? String(r.servings) : '');
+  const [minutes, setMinutes] = useState(
+    r.activeMinutes != null ? String(r.activeMinutes) : (r.estMinutes != null ? String(r.estMinutes) : ''));
+  const [url, setUrl] = useState(r.url || '');
+
+  const cleanName = name.trim();
+  const renaming = cleanName && cleanName !== r.name;
+  const ready = !!cleanName;
+
+  const save = () => {
+    if (!ready) return;
+    const s = parseInt(servings, 10);
+    const m = parseInt(minutes, 10);
+    onSave({
+      name: cleanName,
+      servings: Number.isFinite(s) && s > 0 ? s : r.servings,
+      activeMinutes: Number.isFinite(m) && m > 0 ? m : r.activeMinutes,
+      url: url.trim(),
+    });
+    onClose();
+  };
+
+  const label = { fontSize:14, color:'var(--text-dimmer)', marginBottom:4 };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-sheet" onClick={e => e.stopPropagation()} style={{ maxHeight:'88%' }}>
+        <div className="modal-grabber" />
+        <div className="modal-header">
+          <div className="modal-title">Edit recipe</div>
+          <span className="modal-close" onClick={onClose}>×</span>
+        </div>
+
+        <div style={{ overflowY:'auto', flex:1, paddingRight:2 }}>
+          <div style={{ display:'flex', gap:12, alignItems:'center', marginBottom:14 }}>
+            <RecipeThumb recipe={r} size={72} />
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:15, color:'var(--text-dimmer)', marginBottom:6 }}>Photo</div>
+              <div
+                onClick={onPhoto}
+                className="pill pill-on"
+                style={{ cursor:'pointer' }}
+              >📷 Change photo</div>
+            </div>
+          </div>
+
+          <div style={label}>Name</div>
+          <input
+            className="text-input"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Recipe name"
+            style={{ marginBottom:4 }}
+          />
+          {renaming && (
+            <div style={{ fontSize:13, color:'var(--purple-light)', marginBottom:10, lineHeight:1.45 }}>
+              Renaming also updates it on your calendar, in your cooking history, and on
+              any grocery item it put there.
+            </div>
+          )}
+          {!renaming && <div style={{ height:10 }} />}
+
+          <div style={{ display:'flex', gap:10, marginBottom:10 }}>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={label}>Serves</div>
+              <input
+                className="text-input" inputMode="numeric" value={servings}
+                onChange={e => setServings(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="4"
+              />
+            </div>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={label}>Hands-on minutes</div>
+              <input
+                className="text-input" inputMode="numeric" value={minutes}
+                onChange={e => setMinutes(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="30"
+              />
+            </div>
+          </div>
+
+          <div style={label}>Source link</div>
+          <input
+            className="text-input"
+            type="url"
+            value={url}
+            onChange={e => setUrl(e.target.value)}
+            placeholder="https://…"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+          />
+          <div style={{ fontSize:13, color:'var(--text-dimmer)', margin:'6px 0 4px', lineHeight:1.45 }}>
+            Ingredients and steps are edited on the recipe itself.
+          </div>
+        </div>
+
+        <div className="btn-wrap" style={{ padding:'14px 0 4px' }}>
+          <div
+            className="gen-btn"
+            style={ready ? null : { opacity:0.5, cursor:'default' }}
+            onClick={ready ? save : undefined}
+          >Save changes</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* Change the photo on a recipe. Three ways out: generate a different one,
    point at a real photo on the web, or go back to the default. Needed because
    the generated shot is a guess — a good one, but the cook is the one who
@@ -6790,7 +6904,7 @@ function AddToCalendarSheet({ recipe, weekMap, setWeekMap, onClose, onDone }) {
 /* ═══════════════════════════════════════════
    SCREEN: RECIPE DETAIL
 ═══════════════════════════════════════════ */
-function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB, groceryList, setGroceryList, pantryStaples, altPicks, setAltPicks }) {
+function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipeDB, setRecipeDB, groceryList, setGroceryList, pantryStaples, altPicks, setAltPicks, onRenameRecipe }) {
   /* Always read the live row out of the library. `recipe` is a snapshot taken
      when the row was tapped, and edits here write to recipeDB — rendering the
      snapshot meant a save appeared to revert instantly, because the screen was
@@ -6804,6 +6918,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const [notesDirty, setNotesDirty] = useState(false);
   const [heroIdx, setHeroIdx] = useState(0);
   const [photoSheet, setPhotoSheet] = useState(false);
+  const [editSheet, setEditSheet] = useState(false);
   // Toggle between the full Ingredients view (hero + meta + tags + ingredients)
   // and a minimal Steps view (notes + steps only) for cooking.
   const [activeTab, setActiveTab] = useState('ingredients');
@@ -6979,6 +7094,31 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   // heroIdx sends the hero back to the top of the source list, so a newly
   // pasted URL is what gets tried first rather than staying on whatever
   // fallback the previous photo had already stepped down to.
+  /* Save the header fields. The rename cascade runs FIRST and against the old
+     name: once recipeDB carries the new one there is nothing left to match the
+     calendar and grocery rows on. */
+  const saveEdits = (patch) => {
+    if (!setRecipeDB || !r.id) return;
+    const oldName = r.name;
+    if (patch.name && patch.name !== oldName) {
+      if (onRenameRecipe) onRenameRecipe(oldName, patch.name);
+      else console.warn('[recipe] renamed with no cascade handler — calendar will not follow');
+    }
+    setRecipeDB(prev => prev.map(x => {
+      if (x.id !== r.id) return x;
+      const next = { ...x, ...patch };
+      // `time` is the display string built from the minutes; keep the two in
+      // step or the header would show a number the editor no longer holds.
+      if (patch.activeMinutes && patch.activeMinutes !== x.activeMinutes) {
+        next.estMinutes = Math.max(patch.activeMinutes, x.passiveMinutes || 0) + 5;
+        next.time = `${next.estMinutes} min`;
+      }
+      return next;
+    }));
+    setToast(patch.name && patch.name !== oldName ? 'Recipe renamed' : 'Recipe saved');
+    setTimeout(() => setToast(''), 2200);
+  };
+
   const applyPhoto = (patch) => {
     if (!setRecipeDB || !r.id) return;
     setRecipeDB(prev => prev.map(x => x.id === r.id ? { ...x, ...patch } : x));
@@ -7101,10 +7241,10 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
             </div>
             <div style={{ position:'absolute', top:8, right:8, display:'flex', gap:6 }}>
               <span
-                onClick={() => setPhotoSheet(true)}
+                onClick={() => setEditSheet(true)}
                 style={{ fontSize:15, color:'#ddd', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #444', borderRadius:6, cursor:'pointer' }}
-                title="Change photo"
-              >📷 photo</span>
+                title="Edit name, photo and details"
+              >✎ edit</span>
               <span
                 onClick={() => setConfirmDel(true)}
                 style={{ fontSize:15, color:'#e29090', padding:'4px 10px', background:'rgba(0,0,0,0.5)', border:'1px solid #5a2030', borderRadius:6, cursor:'pointer' }}
@@ -7380,6 +7520,15 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
             setToast(msg);
             setTimeout(() => setToast(''), 3500);
           }}
+        />
+      )}
+
+      {editSheet && (
+        <RecipeEditSheet
+          recipe={r}
+          onSave={saveEdits}
+          onPhoto={() => { setEditSheet(false); setPhotoSheet(true); }}
+          onClose={() => setEditSheet(false)}
         />
       )}
 
@@ -8937,6 +9086,77 @@ function App() {
     }
   };
 
+  /* Renaming a recipe is not a one-field edit. The name IS the reference:
+     the calendar stores dinners by name, so does cooking history, and every
+     grocery row records which meal put it there. Changing only recipeDB would
+     leave the week pointing at a recipe that no longer exists — the day keeps
+     showing the old title but stops opening, and its groceries stop being
+     attributed. Everything that names it moves together. */
+  const renameRecipeEverywhere = (oldName, newName) => {
+    if (!oldName || !newName || oldName === newName) return;
+    const swap = (n) => (n === oldName ? newName : n);
+
+    setWeekMap(prev => {
+      const next = {};
+      let touched = false;
+      Object.entries(prev || {}).forEach(([off, week]) => {
+        next[off] = (week || []).map(slot => {
+          if (!slot || !slot.meals) return slot;
+          const b = Array.isArray(slot.meals.b) ? slot.meals.b : (slot.meals.b ? [slot.meals.b] : []);
+          const snacks = slot.meals.snacks || [];
+          if (slot.meals.d !== oldName && !b.includes(oldName) && !snacks.includes(oldName)) return slot;
+          touched = true;
+          return { ...slot, meals: {
+            ...slot.meals,
+            d: swap(slot.meals.d),
+            b: b.map(swap),
+            snacks: snacks.map(swap),
+          } };
+        });
+      });
+      return touched ? next : prev;
+    });
+
+    setCookingHistory(prev =>
+      (prev || []).some(h => h && h.name === oldName)
+        ? prev.map(h => (h && h.name === oldName ? { ...h, name: newName } : h))
+        : prev);
+
+    // Grocery sources read "Aug 26 · Chicken Tikka Masala". Rewrite only the
+    // recipe half of each segment so the date is left exactly as it was.
+    setGroceryList(prev => {
+      let touched = false;
+      const next = (prev || []).map(it => {
+        if (!it || !it.src || !it.src.includes(oldName)) return it;
+        const segs = it.src.split(' + ').map(seg => {
+          const i = seg.indexOf(' · ');
+          if (i === -1) return seg === oldName ? newName : seg;
+          return seg.slice(0, i + 3) + swap(seg.slice(i + 3).trim());
+        });
+        touched = true;
+        return { ...it, src: segs.join(' + ') };
+      });
+      return touched ? next : prev;
+    });
+
+    /* Two auto-plan lists also hold bare names: the breakfast rotation and the
+       recently-shown window. They belong to AutoPlanScreen, which is not
+       mounted while the user is on a recipe, so they are patched in storage —
+       the screen reads them fresh when the tab is next opened, and the write
+       syncs like any other. Left stale they would silently stop matching. */
+    ['ab.autoplan.breakfastPicks', 'ab.autoplan.recentDinners.v1'].forEach(key => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return;
+        const list = JSON.parse(raw);
+        if (!Array.isArray(list) || !list.includes(oldName)) return;
+        localStorage.setItem(key, JSON.stringify(list.map(swap)));
+      } catch (e) {
+        console.warn('[rename] could not patch', key, e);
+      }
+    });
+  };
+
   const handleSaveNewRecipe = (data) => {
     if (!data) return;
     /* Drop blank rows left behind in the import preview. Ingredient lines and
@@ -8987,6 +9207,7 @@ function App() {
         pantryStaples={pantryStaples}
         altPicks={altPicks}
         setAltPicks={setAltPicks}
+        onRenameRecipe={renameRecipeEverywhere}
       />;
     }
     if (subscreen === 'add-recipe') {
