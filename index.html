@@ -4121,7 +4121,9 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
       } else if (slot === 'b') {
         d.meals.b = [];
       } else if (slot === 'd') {
-        d.meals.d = null;
+        // Same promotion as a move: never leave a day holding an extra meal
+        // but showing no dinner.
+        d.meals.d = promoteFromExtras(d.meals.snacks);
       } else if (typeof slot === 'number') {
         d.meals.snacks.splice(slot, 1);
       }
@@ -4155,9 +4157,32 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
       if (!draft.tasks.includes(recipeName)) draft.tasks.push(recipeName);
     }
   };
+  /* Which extra meal, if any, should step up when a day loses its dinner.
+     A side is not a dinner: garlic bread must not take the slot and leave a
+     real main sitting behind it as an "extra". If every extra is a side, the
+     day simply has no dinner — which is the truth. */
+  const promoteFromExtras = (snacks) => {
+    if (!Array.isArray(snacks) || !snacks.length) return null;
+    const isSide = (name) => {
+      const r = (recipeDB || []).find(x => x && x.name === name);
+      return !!(r && (r.tags || []).includes('sides'));
+    };
+    const i = snacks.findIndex(n => !isSide(n));
+    if (i === -1) return null;
+    return snacks.splice(i, 1)[0];
+  };
+
   const removeFromDay = (draft, mealType, slot) => {
     if (mealType === 'b') draft.meals.b.splice(slot.idx, 1);
-    else if (mealType === 'd') draft.meals.d = null;
+    else if (mealType === 'd') {
+      /* When the dinner leaves, an extra meal on the same day steps up to be
+         the dinner. Swapping two days used to strand one: moving A onto B's
+         day made A an extra, and moving B back left B's day holding an extra
+         and NO dinner. The meal was still there, but only as an "extra meal"
+         — invisible to the week strip and to anything that reads the day's
+         dinner, which reads as having lost it. */
+      draft.meals.d = promoteFromExtras(draft.meals.snacks);
+    }
     else if (mealType === 'snack') draft.meals.snacks.splice(slot, 1);
     else if (mealType === 'task') draft.tasks.splice(slot.idx, 1);
     if (!dayHasContent(draft)) draft.planned = false;
@@ -8380,9 +8405,11 @@ function AutoPlanScreen({
       const t = perDay.find(p => key(p) === toKey);
       if (!f || !t || f === t || !f.dinner) return prev;
       const moved = f.dinner;
-      // The source day gives up its dinner; if it was holding extras, the
-      // first of those steps up rather than leaving a hole.
-      f.dinner = f.extras.length ? f.extras.shift() : null;
+      /* The source day gives up its dinner; an extra steps up rather than
+         leaving a hole — but only a real main. A side taking the dinner slot
+         would leave an actual dinner sitting behind it as an extra. */
+      const mainIdx = f.extras.findIndex(x => x && !(x.tags || []).includes('sides'));
+      f.dinner = mainIdx === -1 ? null : f.extras.splice(mainIdx, 1)[0];
       if (!t.dinner) t.dinner = moved;
       else t.extras.push(moved);
       return { ...prev, perDay };
