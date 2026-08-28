@@ -587,9 +587,37 @@ body {
 .h-scroll-arrow.left  { left: 14px; }
 .h-scroll-arrow.right { right: 14px; }
 .h-scroll-arrow.disabled { opacity: 0; pointer-events: none; }
+/* ── Portrait only, on phones ──
+   The manifest already asks for portrait; Android honours it, iOS does not.
+   So on a phone turned sideways the app steps aside and asks for it back
+   rather than reflowing into a shape none of these screens were built for.
+
+   The gate is deliberately narrow: coarse pointer AND a short viewport. A
+   desktop browser window is landscape too, and the app is meant to work
+   there — a laptop has a fine pointer, and a tablet in landscape is tall
+   enough to miss the height test. */
+@media (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
+  .rotate-gate { display: flex !important; }
+  .phone { display: none !important; }
+}
+.rotate-gate {
+  display: none;
+  position: fixed; inset: 0; z-index: 9999;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; text-align: center; padding: 24px;
+  background: var(--bg); color: var(--text);
+}
+.rotate-gate .rg-icon { font-size: 44px; }
+.rotate-gate .rg-title { font-family: var(--font); font-size: 30px; color: var(--purple-light); }
+.rotate-gate .rg-body { font-size: 16px; color: var(--text-dimmer); max-width: 32ch; line-height: 1.5; }
 </style>
 </head>
 <body>
+<div class="rotate-gate">
+  <div class="rg-icon">📱</div>
+  <div class="rg-title">Turn me back upright</div>
+  <div class="rg-body">AndersonFam is built for a portrait screen — rotate your phone and it&rsquo;ll pick up right where you left off.</div>
+</div>
 <div id="root" style="color:#888;font-family:sans-serif;padding:20px">Loading…</div>
 <script>
 window.addEventListener('error', e => {
@@ -3483,6 +3511,24 @@ const currentPlanOffset = () => {
   const diffDays = Math.floor((todayMidnight().getTime() - baseMon.getTime()) / (24 * 3600 * 1000));
   return Math.floor(diffDays / 7);
 };
+
+/* Which week Auto-Plan should open on. From Friday the current week is
+   effectively spent — the shopping is done and the dinners are cooked — so
+   planning it is pointless. Friday, Saturday and Sunday open on NEXT week,
+   which is the one actually being planned then. Mon–Thu still open on the
+   week in progress, for the odd mid-week re-plan. */
+const isPlanningAhead = () => {
+  const dow = todayMidnight().getDay();   // 0 Sun … 5 Fri, 6 Sat
+  return dow === 5 || dow === 6 || dow === 0;
+};
+const defaultPlanOffset = () => currentPlanOffset() + (isPlanningAhead() ? 1 : 0);
+
+/* Which days come pre-ticked. Planning the week ahead from a Friday means a
+   full working week, so Mon–Fri are offered; mid-week keeps the old
+   Tue/Wed/Thu + following Mon shape, which is what a partial re-plan wants.
+   Either way these are only defaults — a day the user has toggled themselves
+   is remembered per week and wins over both. */
+const PLAN_DAYS_AHEAD_ON = [true, true, true, true, true, false, false, false];
 
 // Normalize a breakfast field to string[]: legacy data may be a single string,
 // null, undefined, or already an array. Filter out empties so consumers can
@@ -7632,9 +7678,10 @@ const PLAN_DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun','Mon'];
 function buildPlanDays(offset) {
   const monday = new Date(BASE_SUNDAY);
   monday.setDate(monday.getDate() + 1 + offset * 7);
-  // Pre-toggle the typical weekday-dinner days (Tue/Wed/Thu/Mon) only for
-  // the plan week containing TODAY, not the always-stale Apr 27 epoch.
-  const todayOffset = currentPlanOffset();
+  // Pre-toggle only the week Auto-Plan actually opens on, not the always-stale
+  // Apr 27 epoch. From Friday that is next week, ticked Mon–Fri.
+  const todayOffset = defaultPlanOffset();
+  const ahead = isPlanningAhead();
   return Array.from({ length: 8 }, (_, i) => {
     const d = new Date(monday);
     d.setDate(d.getDate() + i);
@@ -7644,7 +7691,8 @@ function buildPlanDays(offset) {
       dt: `${MONTHS[d.getMonth()]} ${d.getDate()}`,
       weekOffset: Math.floor(daysSinceBase / 7),
       slotIdx: ((daysSinceBase % 7) + 7) % 7,
-      on: offset === todayOffset ? PLAN_DAYS[i].on : false,
+      on: offset !== todayOffset ? false
+        : (ahead ? PLAN_DAYS_AHEAD_ON[i] : PLAN_DAYS[i].on),
     };
   });
 }
@@ -7692,7 +7740,7 @@ function AutoPlanScreen({
   // Default Auto-Plan to the Mon–Sun week that contains today (NOT
   // currentWeekOffset, which uses Sun–Sat semantics and would land on
   // next week's plan whenever today is a Sunday).
-  const [planOffset, setPlanOffset] = useState(() => currentPlanOffset());
+  const [planOffset, setPlanOffset] = useState(() => defaultPlanOffset());
   const [daysByOffset, setDaysByOffset] = usePersistedState('ab.autoplan.daysByOffset', {});
   // Always rebuild labels/dates from buildPlanDays; only preserve `on` flags from persisted data
   const days = (() => {
@@ -8672,21 +8720,27 @@ const PACKING_SEED = {
       'Sunscreen', 'Bath stuff', 'Bum cream', 'Pacifier', 'Smoothie cup',
       'Vitamin D',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
+    // Clothes get their own section: they were scattered across three others,
+    // and one line ("Clothes/Underwear/Swimsuits/socks") lumped four things
+    // together, so nothing could be ticked off as it was packed.
+    { id: uidPk(), name: 'Clothes', items: [
+      'Clothes', 'Underwear', 'Swimsuits', 'Socks', 'Shoes',
+      'Snow pants', 'Jacket (x2)', 'Rain coat', 'Hat (x2)',
+    ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Upstairs Items', items: [
-      'Clothes/Underwear/Swimsuits/socks', 'Diapers & night (Chase/Hazel)',
+      'Diapers & night (Chase/Hazel)',
       'Wipes', 'Books', 'Sleep sack', 'Stuffed animals & blanket',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Downstairs items', items: [
-      'Toys', 'Diaper bag', 'Bottles (Chase/Hazel)', 'Hat (x2)', 'Snow pants',
-      'Jacket (x2)', 'Formula',
+      'Toys', 'Diaper bag', 'Bottles (Chase/Hazel)', 'Formula',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Last minute items', items: [
       'White noise (charge it before leaving)', 'Kids water',
-      'Snacks for car in lunchbox', 'Tablets for car', 'Shoes/socks/Jacket',
+      'Snacks for car in lunchbox', 'Tablets for car',
       'Potty', 'Stuffed animals', 'Baby brezza', 'Pacifiers',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     { id: uidPk(), name: 'Other', items: [
-      'Purse', 'Sunglasses', 'Computer', 'Rain coat', 'Water bottle',
+      'Purse', 'Sunglasses', 'Computer', 'Water bottle',
       'Ear plugs and eyemask', 'Contacts', 'Skis Chase',
     ].map(n => ({ id: uidPk(), name: n, packed: false })) },
     // Kept at the Fernie place — collapses when "Going to Fernie?" is on,
@@ -8700,6 +8754,47 @@ const PACKING_SEED = {
 function PackingScreen({ onTab, data, setData }) {
   const [editMode, setEditMode] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+
+  /* Entering edit mode swaps every row for a taller input, so the list grows
+     by roughly half. Keeping the same scrollTop therefore shows completely
+     different content — the section you were working on ends up far below,
+     which reads as having been thrown back to the top. So we hold the
+     CONTENT, not the offset: note which section is at the top of the view and
+     where it sits, then put it back after the re-render. */
+  const paneRef = useRef(null);
+  const anchorRef = useRef(null);
+
+  const captureAnchor = () => {
+    const pane = paneRef.current;
+    if (!pane) return;
+    const paneTop = pane.getBoundingClientRect().top;
+    const blocks = [...pane.querySelectorAll('[data-catid]')];
+    // The last section whose top is at or above the fold — i.e. the one being
+    // read. Falls back to the first, for a pane scrolled to the very top.
+    let chosen = blocks[0];
+    for (const el of blocks) {
+      if (el.getBoundingClientRect().top - paneTop <= 8) chosen = el;
+      else break;
+    }
+    if (!chosen) return;
+    anchorRef.current = {
+      id: chosen.getAttribute('data-catid'),
+      offset: chosen.getBoundingClientRect().top - paneTop,
+    };
+  };
+
+  useLayoutEffect(() => {
+    const a = anchorRef.current;
+    const pane = paneRef.current;
+    if (!a || !pane) return;
+    anchorRef.current = null;
+    const el = pane.querySelector(`[data-catid="${a.id}"]`);
+    if (!el) return;
+    const delta = (el.getBoundingClientRect().top - pane.getBoundingClientRect().top) - a.offset;
+    if (delta) pane.scrollTop += delta;
+  }, [editMode]);
+
+  const toggleEditMode = () => { captureAnchor(); setEditMode(m => !m); };
 
   const cats = Array.isArray(data && data.categories) ? data.categories : [];
   const goingToFernie = !!(data && data.goingToFernie);
@@ -8817,7 +8912,7 @@ function PackingScreen({ onTab, data, setData }) {
           <Toggle on={goingToFernie} onChange={() => {}} />
         </div>
         <div
-          onClick={() => setEditMode(!editMode)}
+          onClick={toggleEditMode}
           style={{
             padding: '10px 12px', borderRadius: 10, cursor: 'pointer', fontSize: 17,
             background: editMode ? 'var(--purple-mid)' : '#131320',
@@ -8841,7 +8936,7 @@ function PackingScreen({ onTab, data, setData }) {
         </div>
       )}
 
-      <div className="pane packing-pane">
+      <div className="pane packing-pane" ref={paneRef}>
         {cats.map((cat, ci) => {
           const items = cat.items || [];
           const packed = items.filter(i => i.packed).length;
@@ -8849,17 +8944,25 @@ function PackingScreen({ onTab, data, setData }) {
           const manualHidden = !editMode && !!cat.collapsed;  // user folded it
           const hideRows = fernieHidden || manualHidden;
           return (
-            <div key={cat.id} style={{ marginBottom: 6, opacity: fernieHidden ? 0.4 : 1 }}>
+            <div key={cat.id} data-catid={cat.id} style={{ marginBottom: 6, opacity: fernieHidden ? 0.4 : 1 }}>
               <div className="cat-header" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {editMode ? (
                   <>
+                    {/* A section header has to look like one while editing.
+                        It used to be the same box as an item — same size, same
+                        border — so the list read as one flat run of fields with
+                        no visible structure. */}
+                    <span style={{ fontSize: 11, color: 'var(--purple-light)', letterSpacing: '0.12em',
+                                   background: 'var(--purple-mid)', border: '1px solid var(--purple)',
+                                   borderRadius: 4, padding: '3px 6px', flexShrink: 0 }}>SECTION</span>
                     <input
                       value={cat.name}
                       onChange={e => renameCategory(cat.id, e.target.value)}
-                      placeholder="category name"
-                      style={{ flex: 1, minWidth: 0, background: '#0f0f18', border: '1px solid var(--border)',
-                               borderRadius: 6, padding: '7px 9px', color: 'var(--text)',
-                               fontFamily: 'var(--font)', fontSize: 21 }}
+                      placeholder="section name"
+                      style={{ flex: 1, minWidth: 0, background: 'rgba(124,58,237,0.10)',
+                               border: '1.5px solid var(--purple)',
+                               borderRadius: 8, padding: '10px 11px', color: 'var(--text)',
+                               fontFamily: 'var(--font)', fontSize: 26 }}
                     />
                     <span onClick={() => moveCategory(ci, -1)} style={miniBtn}>▲</span>
                     <span onClick={() => moveCategory(ci, 1)} style={miniBtn}>▼</span>
@@ -8893,7 +8996,7 @@ function PackingScreen({ onTab, data, setData }) {
                   always reachable while editing. */}
               {!hideRows && items.map((it, ii) => (
                 <div key={it.id} className={`check-row${!editMode && it.packed ? ' crossed' : ''}`}
-                     style={{ gap: 10 }}>
+                     style={{ gap: 10, paddingLeft: editMode ? 14 : 0 }}>
                   {editMode ? (
                     <>
                       <input
@@ -9034,6 +9137,49 @@ function App() {
       return dated.some(d => d >= today.getTime()); // still coming → keep
     }));
     setGroceryLastReset(fri.getTime());
+  }, []); // run once on mount
+
+  /* One-time migration: pull the clothes out into their own section.
+     The seed only reaches a fresh install; this is what reaches the list
+     already on the phone. Deliberately conservative — it moves only lines it
+     still recognises by name, so anything renamed or added by hand stays put,
+     and `packed` travels with each item. The one lumped line is split into
+     its parts so each can be ticked as it goes in the bag. */
+  useEffect(() => {
+    if (localStorage.getItem('ab.migration.clothesV1') === 'done') return;
+    const SPLIT = { 'clothes/underwear/swimsuits/socks': ['Clothes','Underwear','Swimsuits','Socks'],
+                    'shoes/socks/jacket': ['Shoes','Socks','Jacket'] };
+    const MOVE = new Set(['snow pants','jacket (x2)','rain coat','hat (x2)']);
+    setPacking(prev => {
+      const cats = (prev && prev.categories) || [];
+      if (!cats.length || cats.some(c => /^clothes$/i.test((c.name || '').trim()))) return prev;
+      const moved = [];
+      const seen = new Set();
+      /* Dedupe on the base name so a bare "Jacket" from one line does not sit
+         next to "Jacket (x2)" from another. First in wins, and the lines that
+         carry a count are read first, so the more useful wording survives. */
+      const baseKey = (n) => n.toLowerCase().replace(/\s*\([^)]*\)\s*$/, '').trim();
+      const take = (name, packed) => {
+        const key = baseKey(name);
+        if (seen.has(key)) return;      // "Socks" arrives from two lines
+        seen.add(key);
+        moved.push({ id: uidPk(), name, packed });
+      };
+      const rest = cats.map(c => ({
+        ...c,
+        items: (c.items || []).filter(it => {
+          const key = (it.name || '').trim().toLowerCase();
+          if (SPLIT[key]) { SPLIT[key].forEach(n => take(n, it.packed)); return false; }
+          if (MOVE.has(key)) { take(it.name, it.packed); return false; }
+          return true;
+        }),
+      }));
+      if (!moved.length) return prev;
+      // Sits at the top: it is the bulkiest thing to pack and the first thing
+      // anyone reaches for.
+      return { ...prev, categories: [{ id: uidPk(), name: 'Clothes', items: moved }, ...rest] };
+    });
+    try { localStorage.setItem('ab.migration.clothesV1', 'done'); } catch {}
   }, []); // run once on mount
 
   // One-time migration: tag known side dishes with `sides` so they stop being
