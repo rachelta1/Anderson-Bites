@@ -3961,30 +3961,33 @@ function UseWhatIHaveSheet({ weekTitle, plannedCount, busy, hasKey, error, onRun
 
 function TaskSheet({ initial, onSave, onClose }) {
   const [val, setVal] = useState(initial || '');
+  // Editing an existing one said "Add task", which was wrong on its face.
+  const editing = !!(initial && initial.trim());
   const save = () => { if (val.trim()) onSave(val.trim()); };
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
         <div className="modal-grabber" />
         <div className="modal-header">
-          <div className="modal-title">Add task</div>
+          <div className="modal-title">{editing ? 'Edit task or note' : 'Add a task or note'}</div>
           <span className="modal-close" onClick={onClose}>×</span>
         </div>
         <input
           className="task-input"
           autoFocus
-          placeholder="e.g. Laundry, vacuum, take out trash…"
+          placeholder="e.g. Laundry, or “Ella has swimming at 4”"
           value={val}
           onChange={e => setVal(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') save(); }}
         />
-        <div className="task-quick">
+        <div style={{ fontSize:14, color:'var(--text-dimmer)', marginTop:10 }}>Quick picks</div>
+        <div className="task-quick" style={{ marginTop:6 }}>
           {TASK_SUGGESTIONS.map(s => (
             <div key={s} className="pill pill-off" style={{ color:'var(--text-sec)' }} onClick={() => setVal(s)}>{s}</div>
           ))}
         </div>
         <div className="btn-wrap" style={{ padding:'14px 0 4px' }}>
-          <div className="gen-btn" onClick={save}>Save Task</div>
+          <div className="gen-btn" onClick={save}>{editing ? 'Save changes' : 'Add to this day'}</div>
         </div>
       </div>
     </div>
@@ -4355,7 +4358,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
           <div style={{ fontSize:17, color:'#2a2a3e' }}>Add a meal</div>
         </div>
 
-        <div className="section-label">Tasks</div>
+        <div className="section-label">Tasks &amp; notes</div>
 
         {(day.tasks || []).map((t, i) => {
           const parsed = splitTaskIcon(t);
@@ -4364,7 +4367,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
               <span className="meal-slot-icon">{parsed.icon || '✓'}</span>
               <div style={{ flex:1 }}>
                 <div className="meal-slot-name">{parsed.name}</div>
-                <div className="meal-slot-meta">Household task</div>
+                <div className="meal-slot-meta">Task or note</div>
               </div>
               <span className="meal-slot-edit" title="rename">✎</span>
               <span
@@ -4384,7 +4387,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
         >
           <span style={{ fontSize:23, color:'#2a2a3e' }}>+</span>
           <div style={{ fontSize:17, color:'#2a2a3e' }}>
-            {(day.tasks && day.tasks.length) ? 'Add another task' : 'Add task (laundry, etc.)'}
+            {(day.tasks && day.tasks.length) ? 'Add another' : 'Add a task or note'}
           </div>
         </div>
 
