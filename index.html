@@ -5902,27 +5902,32 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
 
       {/* Toolbar */}
       <div style={{ display:'flex', gap:8, padding:'0 16px 10px', alignItems:'center', flexWrap:'wrap' }}>
+        {/* The primary action on this screen, and it was set smaller than the
+            items it adds to (21px against the list's 22px). Sized up to lead,
+            with the whole row a comfortable one-handed target. */}
         <div style={{
-          flex:1, height:48, display:'flex', alignItems:'center',
+          flex:1, minWidth:'100%', height:60, display:'flex', alignItems:'center',
           background:'#0f0f18',
           border:`1.5px ${newItemText ? 'solid' : 'dashed'} ${newItemText ? 'var(--purple)' : 'var(--border)'}`,
-          borderRadius:10, padding:'0 10px 0 14px', gap:8,
+          borderRadius:12, padding:'0 8px 0 16px', gap:10,
         }}>
-          <span style={{ fontSize:25, color:'var(--text-dimmer)' }}>+</span>
+          <span style={{ fontSize:30, color:'var(--text-dimmer)', lineHeight:1 }}>+</span>
           <input
             value={newItemText}
             onChange={e => setNewItemText(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addItem(); }}
             placeholder="add item (e.g. 2 lbs ground beef)"
             style={{
-              flex:1, background:'transparent', border:'none', outline:'none',
-              color:'var(--text)', fontFamily:'var(--font)', fontSize:21,
+              flex:1, minWidth:0, background:'transparent', border:'none', outline:'none',
+              color:'var(--text)', fontFamily:'var(--font)', fontSize:25,
             }}
           />
           {newItemText && (
             <span
               onClick={addItem}
-              style={{ fontSize:18, fontWeight:700, color:'var(--purple-light)', cursor:'pointer', padding:'0 6px' }}
+              style={{ fontSize:21, fontWeight:700, color:'var(--purple-light)', cursor:'pointer',
+                       padding:'10px 14px', borderRadius:8, background:'var(--purple-mid)',
+                       border:'1.5px solid var(--purple)', lineHeight:1, flexShrink:0 }}
             >add</span>
           )}
         </div>
