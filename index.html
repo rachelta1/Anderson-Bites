@@ -7204,6 +7204,27 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     setHeroIdx(0);
   };
 
+  /* Notes were a fixed two-line box: write four lines and two of them sat
+     hidden behind an internal scrollbar with nothing on screen to say so. The
+     box now grows to fit what's in it, so every line is visible without
+     hunting. Capped, because a long note must not push the buttons below it
+     off the screen — past the cap it scrolls and says so. */
+  const notesRef = useRef(null);
+  const [notesClipped, setNotesClipped] = useState(false);
+  const NOTES_MAX_PX = 320;
+  const autoSizeNotes = () => {
+    const el = notesRef.current;
+    if (!el) return;
+    el.style.height = 'auto';            // let it shrink as well as grow
+    const full = el.scrollHeight;
+    const height = Math.min(full, NOTES_MAX_PX);
+    el.style.height = height + 'px';
+    setNotesClipped(full > height + 2);
+  };
+  // Re-measure on every change, and when switching tabs — the block is
+  // rendered fresh on each, so the new copy starts at its default height.
+  useLayoutEffect(autoSizeNotes, [notes, activeTab]);
+
   const saveNotes = () => {
     if (!notesDirty || !setRecipeDB || !r.id) return;
     setRecipeDB(prev => prev.map(x => x.id === r.id ? { ...x, notes } : x));
@@ -7288,6 +7309,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
         )}
       </div>
       <textarea
+        ref={notesRef}
         className="text-input"
         value={notes}
         onChange={e => { setNotes(e.target.value); setNotesDirty(true); }}
@@ -7296,9 +7318,16 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
         /* No fontSize here: .text-input already sets it, and an inline
            override left notes reading noticeably smaller than the ingredients
            right above them. Size lives in the class so the recipe screen keeps
-           one text size. */
-        style={{ minHeight:76, lineHeight:1.5, marginBottom:14 }}
+           one text size. resize:none because it sizes itself now — a manual
+           drag would only be undone by the next keystroke. */
+        style={{ minHeight:76, lineHeight:1.5, marginBottom: notesClipped ? 2 : 14,
+                 resize:'none', overflowY: notesClipped ? 'auto' : 'hidden' }}
       />
+      {notesClipped && (
+        <div style={{ fontSize:14, color:'var(--text-dimmer)', marginBottom:12, textAlign:'right' }}>
+          ⌄ scroll for the rest
+        </div>
+      )}
     </>
   );
 
