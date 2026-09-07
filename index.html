@@ -5723,6 +5723,11 @@ function EditItemSheet({ item, onSave, onDelete, onClose }) {
               placeholder="2 lbs"
               style={field}
             />
+            {/* Live metric while typing, so an amount edited by hand can be
+                checked against the packet without leaving the sheet. */}
+            {metricFor(qty) && (
+              <div style={{ fontSize:13, color:'var(--purple-bg)', marginTop:4 }}>{metricFor(qty)}</div>
+            )}
           </div>
           <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontSize:14, color:'var(--text-dimmer)', marginBottom:4 }}>Item</div>
@@ -6070,7 +6075,16 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
                         {rest && <> + <span className="qty">{rest}</span></>}
                       </>;
                     })()}</div>
-                    <div style={{ fontSize:14, color:'#444', marginTop:2 }}>{src}</div>
+                    {/* Metric on the line the eye already goes to for the
+                        secondary detail, so a row stays two lines tall. The
+                        packet in the shop is labelled in grams; the amount
+                        above it is what the recipe asked for. */}
+                    <div style={{ fontSize:14, color:'#444', marginTop:2 }}>
+                      {(() => {
+                        const met = metricFor(q);
+                        return met ? <><span style={{ color:'var(--purple-bg)' }}>{met}</span>{src ? ' · ' : ''}{src}</> : src;
+                      })()}
+                    </div>
                   </div>
                   <span
                     onClick={() => setEditKey(groceryKey(n))}
