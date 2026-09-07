@@ -4605,6 +4605,91 @@ function sumQtyStrings(parts) {
   return [...out, ...unparsed].join(' + ');
 }
 
+/* ── Metric equivalents ──
+   Recipes come from US sites in cups and pounds; the kitchen they're cooked
+   in is metric. Shown alongside the original rather than replacing it, so the
+   line still matches the source when you go back to it.
+
+   Weight converts to grams and volume to millilitres — never across. A cup of
+   flour and a cup of honey weigh very different amounts, so cups→grams needs
+   the density of the specific ingredient and would be a guess; cups→ml is
+   exact for anything. */
+const METRIC_WEIGHT_G = { lb: 453.592, oz: 28.3495 };
+const METRIC_VOLUME_ML = {
+  cup: 236.588, tbsp: 14.7868, tsp: 4.92892,
+  'fl oz': 29.5735, pint: 473.176, quart: 946.353, gallon: 3785.41,
+};
+// Extra spellings the shared unit table doesn't carry, since nothing else
+// needed to tell a fluid ounce from a weight one.
+const METRIC_EXTRA_UNITS = {
+  'fl oz': 'fl oz', 'floz': 'fl oz', 'fluid ounce': 'fl oz', 'fluid ounces': 'fl oz',
+  pint: 'pint', pints: 'pint', pt: 'pint',
+  quart: 'quart', quarts: 'quart', qt: 'quart',
+  gallon: 'gallon', gallons: 'gallon', gal: 'gallon',
+};
+
+/* Round to something a cook would actually write. Tight at small amounts
+   where a few grams matter, looser as the numbers grow — 453.592 g of mince
+   is 450 g in every cookbook ever printed. */
+function roundMetric(v) {
+  // Half-steps below 10: half a teaspoon is 2.5 ml, and calling it 2 is the
+  // kind of small wrongness that shows up in a bake.
+  if (v < 10) return Math.round(v * 2) / 2;
+  if (v < 250) return Math.round(v / 5) * 5;
+  if (v < 1000) return Math.round(v / 10) * 10;
+  return Math.round(v / 50) * 50;
+}
+
+/* The metric equivalent of one amount, or null when there isn't a meaningful
+   one — a count ("2 eggs"), an already-metric amount, or a unit that isn't a
+   measure at all ("1 can"). */
+function metricFor(qty) {
+  const segs = String(qty || '').split(' + ').map(x => x.trim()).filter(Boolean);
+  const out = [];
+  for (const seg of segs) {
+    const p = parseQtySegment(seg);
+    if (!p || !p.rawUnit) continue;
+    const raw = p.rawUnit.toLowerCase().replace(/\.$/, '');
+    let key = METRIC_EXTRA_UNITS[raw] || (p.unitInfo ? p.unitInfo.key : null);
+    let num = p.num;
+    if (!key) {
+      /* Tins and packets carry their size in brackets — "1 (15 oz) can", "2
+         (14.5 ounce) cans" — and that inner amount is the useful one. Without
+         this the most common canned-goods shape converts to nothing. */
+      const inner = raw.match(/\((\d+(?:\.\d+)?)[\s-]*(fl\s*oz|oz|ounces?|lbs?|pounds?|cups?|ml|g|grams?)\s*\)/);
+      if (!inner) continue;
+      const innerKey = METRIC_EXTRA_UNITS[inner[2]]
+        || (QTY_UNIT_TABLE[inner[2]] ? QTY_UNIT_TABLE[inner[2]].key : null);
+      if (!innerKey || (METRIC_WEIGHT_G[innerKey] == null && METRIC_VOLUME_ML[innerKey] == null)) continue;
+      key = innerKey;
+      num = p.num * Number(inner[1]);   // two 14 oz cans is 28 oz
+    }
+    if (METRIC_WEIGHT_G[key] != null) {
+      const g = num * METRIC_WEIGHT_G[key];
+      out.push(g >= 1000 ? `${Math.round(g / 100) / 10} kg` : `${roundMetric(g)} g`);
+    } else if (METRIC_VOLUME_ML[key] != null) {
+      const ml = num * METRIC_VOLUME_ML[key];
+      out.push(ml >= 1000 ? `${Math.round(ml / 100) / 10} L` : `${roundMetric(ml)} ml`);
+    }
+  }
+  return out.length ? out.join(' + ') : null;
+}
+
+/* Oven temperatures, in the running text of a step. A recipe that says 400°F
+   is unusable at the oven dial without this. Rounded to the 5°C marks ovens
+   are actually numbered in. */
+function withMetricTemps(text) {
+  const src = String(text || '');
+  return src.replace(/(\d{2,3})\s*°?\s*F\b/gi, (m, f, at) => {
+    /* Plenty of recipes already print both ("Preheat oven to 220C / 425F").
+       Adding ours there gives "425F (220°C) (220C)", so look a short way
+       either side for a Celsius reading and leave those alone. */
+    const around = src.slice(Math.max(0, at - 14), at + m.length + 14);
+    if (/\d\s*°?\s*C\b/i.test(around)) return m;
+    return `${m} (${Math.round((Number(f) - 32) * 5 / 9 / 5) * 5}°C)`;
+  });
+}
+
 /* Split a merged amount for display. Counts and weights can't be added — three
    recipes wanting 4 chicken breasts, 4 more, and another 1 1/2 lbs total to
    "8 + 1 1/2 lbs", which is correct but reads like the merge failed. Pulling
@@ -7516,9 +7601,19 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                     ) : (
                       <span style={{ color:'var(--purple-bg)', minWidth:18 }}>•</span>
                     )}
-                    {parsed && parsed.q && (
-                      <span style={{ color:'var(--purple-light)', minWidth:88, flexShrink:0 }}>{parsed.q}</span>
-                    )}
+                    {parsed && parsed.q && (() => {
+                      // Metric sits under the original rather than replacing
+                      // it, so the line still matches the source recipe.
+                      const met = metricFor(parsed.q);
+                      return (
+                        <span style={{ color:'var(--purple-light)', minWidth:88, flexShrink:0, lineHeight:1.25 }}>
+                          {parsed.q}
+                          {met && (
+                            <span style={{ display:'block', fontSize:15, color:'var(--text-dimmer)' }}>{met}</span>
+                          )}
+                        </span>
+                      );
+                    })()}
                     {alts ? (
                       <span style={{ flex:1, display:'flex', flexWrap:'wrap', gap:8 }}>
                         {alts.map(opt => {
@@ -7591,7 +7686,9 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
               {steps.map((s, i) => (
                 <div key={i} style={{ display:'flex', gap:10, padding:'10px 0', fontSize:22, color:'var(--text)', lineHeight:1.65 }}>
                   <span style={{ color:'var(--purple-light)', minWidth:24, fontWeight:600 }}>{i+1}.</span>
-                  <span style={{ flex:1 }}>{s}</span>
+                  {/* Oven temperatures get their °C alongside — a step that
+                      says 400°F is unusable at a dial marked in Celsius. */}
+                  <span style={{ flex:1 }}>{withMetricTemps(s)}</span>
                 </div>
               ))}
 
