@@ -2239,10 +2239,101 @@ function enforcePastaCap({ result, cap, candidates, usedThisRun, tierOf }) {
   }
 }
 
+/* Put the pinned protein on the day it was asked for. Runs LAST of the
+   post-validation passes, so an explicit "pork monday" wins over the tier
+   preferences and the variety heuristics — which is what the user means by
+   naming a day.
+
+   A swap WITHIN the plan is tried first: if Wednesday already has the pork,
+   Monday and Wednesday trade dinners and the week keeps every meal it had.
+   Only if no day holds it does a fresh recipe come in from the library. */
+function enforceDayPins({ result, pins, candidates, usedThisRun, tierOf }) {
+  const entries = Object.entries(pins || {});
+  if (!entries.length) return;
+  const tagOf = (r) => (r && r.tags) || [];
+  for (const [abbr, tag] of entries) {
+    const i = result.findIndex(slot => slot && slot.d === abbr);
+    if (i === -1) continue;                       // that day isn't in the plan
+    const slot = result[i];
+    if (tagOf(slot.dinner).includes(tag)) continue;   // already right
+    const tier = tierOf(slot);
+
+    // Trade with a day that already has it, if both days still fit their tier.
+    const j = result.findIndex((s, k) => k !== i && tagOf(s.dinner).includes(tag));
+    if (j !== -1) {
+      const theirs = result[j].dinner, mine = slot.dinner;
+      const otherTier = tierOf(result[j]);
+      if (tierAllowsComplexity(tier, theirs.complexity)
+       && (!mine || tierAllowsComplexity(otherTier, mine.complexity))) {
+        result[i] = { ...slot, dinner: theirs };
+        result[j] = { ...result[j], dinner: mine };
+        console.log(`[pickPlan] moved ${theirs.name} to ${slot.dt} for "${tag} ${abbr}"`);
+        continue;
+      }
+    }
+
+    // Otherwise bring one in. This can in principle nudge a protein cap or the
+    // pasta cap off by one, and that is the right trade: the user named a day.
+    const pick = (candidates || []).find(r =>
+      r && !usedThisRun.has(r.name) && tagOf(r).includes(tag)
+      && tierAllowsComplexity(tier, r.complexity));
+    if (!pick) {
+      console.warn(`[pickPlan] nothing with "${tag}" fits ${slot.dt} (tier ${tier}) — leaving it`);
+      continue;
+    }
+    if (slot.dinner && slot.dinner.name) usedThisRun.delete(slot.dinner.name);
+    usedThisRun.add(pick.name);
+    result[i] = { ...slot, dinner: pick };
+    console.log(`[pickPlan] put ${pick.name} on ${slot.dt} for "${tag} ${abbr}"`);
+  }
+}
+
 // Parse "I want ground beef" / "chicken sometime" / "shrimp" — any plain
 // mention of a protein word (without a "no/skip/avoid/never" prefix and
 // without a count modifier) is treated as a REQUEST: include at least one
 // dinner with that protein tag. Returns a Set of tags.
+/* "pork monday", "friday shrimp" — a protein pinned to a named day.
+   This is the strongest thing the user can say about the plan, and until now
+   it was only ever ADVICE: the system prompt asked the model to honour it and
+   nothing checked. A plan with pork on Wednesday satisfied the "at least one
+   pork" requirement, so the requirements pass saw nothing wrong and left it.
+
+   Returns { Mon: 'pork', Fri: 'seafood' }. Deliberately narrow — the protein
+   word and the weekday have to be close together, so "pork" in one clause and
+   "monday" in another doesn't invent a pin. */
+function parseDinnerDayRequests(instructions) {
+  if (!instructions) return {};
+  const txt = String(instructions).toLowerCase();
+  // A conjunction between the two words means they belong to different
+  // clauses: "beef on tuesday and fish friday" must not read as fish Tuesday.
+  const JOINER = /\b(?:and|plus|also|then|but|or)\b|[,;]/;
+  const found = {};   // abbr → { tag, gap } — closest pairing wins
+  for (const [tag, words] of Object.entries(PROTEIN_WORDS)) {
+    for (const w of words) {
+      for (const [dayWord, abbr] of Object.entries(DAY_NAME_TO_ABBR)) {
+        // Skip the short abbreviations: "sat" hides inside "saturated" and
+        // "mon" inside "monday", which would pin days nobody named.
+        if (dayWord.length < 6) continue;
+        if (new RegExp(`\\b(?:no|not|skip|avoid|never)\\s+(?:\\w+\\s+){0,2}${w}\\b`).test(txt)) continue;
+        for (const re of [
+          new RegExp(`\\b${w}\\b([^.!?]{0,16}?)\\b${dayWord}\\b`, 'g'),
+          new RegExp(`\\b${dayWord}\\b([^.!?]{0,16}?)\\b${w}\\b`, 'g'),
+        ]) {
+          let m;
+          while ((m = re.exec(txt)) !== null) {
+            const gap = m[1];
+            if (JOINER.test(gap)) continue;
+            if (!found[abbr] || gap.length < found[abbr].gap) found[abbr] = { tag, gap: gap.length };
+          }
+        }
+      }
+    }
+  }
+  const out = {};
+  Object.entries(found).forEach(([abbr, v]) => { out[abbr] = v.tag; });
+  return out;
+}
+
 function parseProteinRequirements(instructions) {
   if (!instructions) return new Set();
   const txt = instructions.toLowerCase();
@@ -2565,6 +2656,7 @@ async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, 
   // where it doesn't.
   const proteinCaps = parseProteinConstraints(instructions);
   const pastaCap = pastaCapFrom(proteinCaps);
+  const dayPins = parseDinnerDayRequests(instructions);
   // Proteins the user MENTIONED (without "no/skip") = should appear at
   // least once each in the plan. Filtered to remove any tag also capped
   // at 0 (e.g. "no chicken" trumps a positive mention).
@@ -2613,7 +2705,7 @@ For each day, return ONE dinner (by exact name from the library) and a list of t
 (1) avoid recipes in the recentlyCooked list;
 (2) do not repeat a dinner within the plan;
 (3) prefer recipes with lower 'used' count when other constraints tie;
-(4) if the user instructions specify a protein/recipe for a specific weekday, prioritize that above all else (it overrides tier preferences);
+(4) DAY_PINS in the user prompt lists weekdays the user tied a protein to (e.g. {"Mon": "pork"} for "pork monday"). Put a dinner with that tag on that exact day. This beats everything else — tier preferences, variety, and the load-spreading in (7). Getting the protein into the week on some other day does NOT satisfy it;
 (5) defaultTasks and breakfastPrep are PRE-ASSIGNED for each day, already honoring any explicit weekday the user gave (e.g. "laundry thursday", "pancakes saturday", or "pancakes and muffins same day"). breakfastPrep may be null OR an array of breakfast names (multiple if the user asked for two on the same day). Echo defaultTasks back as the day's tasks unless the user's instructions add or move something. Each active task should land on at most one day across the plan.
 (6) Each day has a tier field that gates dinner complexity. These are HARD rules — always respect them when an eligible recipe exists:
     - tier === 'breakfast' (day has breakfast prep): dinner MUST be complexity=Light. Cooking in the morning means a no-fuss dinner.
@@ -2627,7 +2719,7 @@ For each day, return ONE dinner (by exact name from the library) and a list of t
 
 Return ONLY JSON, no prose, no markdown.`;
 
-  const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nPASTA_MAX (hard maximum — dinners whose library entry has "isPasta": true, including pasta dishes that also carry a protein tag):\n${pastaCap}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
+  const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nDAY_PINS (weekday → protein the user tied to it; that exact day must have a dinner carrying that tag):\n${JSON.stringify(dayPins)}\n\nPASTA_MAX (hard maximum — dinners whose library entry has "isPasta": true, including pasta dishes that also carry a protein tag):\n${pastaCap}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
 
   const text = await callClaude({ apiKey, system, user, thinking: NO_THINKING });
   const parsed = extractJson(text);
@@ -2895,6 +2987,15 @@ Return ONLY JSON, no prose, no markdown.`;
     }
   }
 
+  /* Weekday pins last, so they survive every pass above. The model is asked
+     for these directly, but asking is not enough on its own — a plan with the
+     pork on Wednesday satisfied the "at least one pork" requirement, so
+     nothing downstream saw anything to fix. */
+  enforceDayPins({
+    result, pins: dayPins, candidates: effectiveCandidates, usedThisRun,
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+  });
+
   return result;
 }
 
@@ -3021,6 +3122,14 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
       }
     }
   }
+
+  /* The rule-based picker had no notion of weekdays for dinners at all — the
+     status line even claimed weekday instructions still applied, which was
+     only ever true for tasks and breakfasts. */
+  enforceDayPins({
+    result, pins: parseDinnerDayRequests(instructions), candidates: effectiveCandidates, usedThisRun,
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+  });
 
   return result;
 }
