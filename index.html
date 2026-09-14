@@ -2542,9 +2542,14 @@ function assignBreakfastsWithInstructions(dinnerDays, tasksByDt, activeBreakfast
 //   'free'      → day has neither breakfast nor tasks. Dinner should be
 //                 Medium or Heavy — NEVER Light. Free days are reserved
 //                 for the more involved recipes.
-function effortTierFor(breakfasts, dayTasks) {
+function effortTierFor(breakfasts, dayTasks, weekday) {
   if (Array.isArray(breakfasts) && breakfasts.length > 0) return 'breakfast';
   if (Array.isArray(dayTasks) && dayTasks.length > 0) return 'task';
+  /* Monday is a light day where the week allows it — back from the weekend,
+     nobody wants a project. It only applies to an otherwise-free Monday: a
+     Monday already carrying breakfast prep or a chore has a stricter tier
+     above, and those win. */
+  if (weekday === 'Mon') return 'monday';
   return 'free';
 }
 
@@ -2554,6 +2559,7 @@ function effortTierFor(breakfasts, dayTasks) {
 function tierAllowsComplexity(tier, complexity) {
   if (tier === 'breakfast') return complexity === 'Light';
   if (tier === 'task') return complexity === 'Light' || complexity === 'Medium';
+  if (tier === 'monday') return complexity === 'Light' || complexity === 'Medium';
   if (tier === 'free') return complexity === 'Medium' || complexity === 'Heavy';
   return true;
 }
@@ -2567,6 +2573,13 @@ function tierComplexityRank(tier, complexity) {
     if (complexity === 'Medium') return 0;
     if (complexity === 'Light') return 1;
     return 2; // Heavy
+  }
+  if (tier === 'monday') {
+    // "when possible": Light is what we want, Medium is a fine week-night
+    // fallback, and Heavy is already excluded by the gate above.
+    if (complexity === 'Light') return 0;
+    if (complexity === 'Medium') return 1;
+    return 2;
   }
   if (tier === 'free') {
     // Medium and Heavy are equally welcome on free days — let
@@ -2687,8 +2700,9 @@ async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, 
     // New tier model (replaces effortCount/preferLight/requireLight):
     //   'breakfast' → REQUIRES Light dinner
     //   'task'      → REQUIRES Medium dinner (Light fallback if no Medium)
+    //   'monday'    → Light preferred, Medium ok, never Heavy
     //   'free'      → REQUIRES Medium or Heavy dinner (NEVER Light)
-    const tier = effortTierFor(dayBreakfasts, defaultTasks);
+    const tier = effortTierFor(dayBreakfasts, defaultTasks, d.d);
     return {
       dt: d.dt, weekday: d.d,
       breakfastPrep: dayBreakfasts.length ? dayBreakfasts : null,
@@ -2710,6 +2724,7 @@ For each day, return ONE dinner (by exact name from the library) and a list of t
 (6) Each day has a tier field that gates dinner complexity. These are HARD rules — always respect them when an eligible recipe exists:
     - tier === 'breakfast' (day has breakfast prep): dinner MUST be complexity=Light. Cooking in the morning means a no-fuss dinner.
     - tier === 'task' (day has tasks like laundry, NO breakfast): dinner SHOULD be complexity=Medium. If no Medium is available, Light is acceptable. NEVER Heavy.
+    - tier === 'monday' (an otherwise-free Monday): dinner SHOULD be complexity=Light — back from the weekend is not the night for a project. Medium is an acceptable fallback when no Light recipe fits the other constraints. NEVER Heavy.
     - tier === 'free' (no breakfast, no tasks): dinner MUST be complexity=Medium OR Heavy. NEVER Light. Free days are reserved for the more involved dishes.
 (7) spread the load: don't pile multiple effort sources on one day if other days are empty. If a user-requested specific dinner (e.g. "pasta one night") would land on a tier='breakfast' day, prefer to put it on a DIFFERENT day instead.
 (8) PROTEIN CAPS are HARD limits. The user prompt includes a PROTEIN_CAPS object listing maximum dinners per protein (e.g. {"chicken": 1} means AT MOST one chicken dinner across the entire plan; {"fish": 0} means zero fish dinners). NEVER exceed these caps. If the user says "chicken one night only" and the cap is 1, exactly zero or one of your picks may have the chicken tag (turkey counts as chicken). When choosing recipes, count the protein tags as you go and stop reaching for that protein once you hit the cap.
@@ -2804,7 +2819,7 @@ Return ONLY JSON, no prose, no markdown.`;
     const breakfasts = breakfastNames.map(n => byName[n] || { name: n });
     const breakfast = breakfasts[0] || null; // back-compat: first breakfast
     const dayTasks = tasksByDtLlm[day.dt] || [];
-    const tier = effortTierFor(breakfasts, dayTasks);
+    const tier = effortTierFor(breakfasts, dayTasks, day.d);
     // isFast retained on the result row only for downstream display/stats —
     // the new tier model handles complexity gating directly.
     const isFast = tier !== 'free';
@@ -2877,7 +2892,7 @@ Return ONLY JSON, no prose, no markdown.`;
   // non-conflicting alternatives that still satisfy the day's tier gate.
   enforcePastaCap({
     result, cap: pastaCap, candidates: effectiveCandidates, usedThisRun,
-    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks, slot.d),
   });
 
   if (Object.keys(proteinCaps).length) {
@@ -2891,7 +2906,7 @@ Return ONLY JSON, no prose, no markdown.`;
       indicesByProtein[t].push(i);
     });
 
-    const dayTier = (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks);
+    const dayTier = (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks, slot.d);
 
     for (const [tag, max] of Object.entries(proteinCaps)) {
       while ((counts[tag] || 0) > max) {
@@ -2963,7 +2978,7 @@ Return ONLY JSON, no prose, no markdown.`;
     let swapped = false;
     for (let i = 0; i < result.length && !swapped; i++) {
       const slot = result[i];
-      const slotTier = slot.tier || effortTierFor(slot.breakfasts, slot.tasks);
+      const slotTier = slot.tier || effortTierFor(slot.breakfasts, slot.tasks, slot.d);
       const slotTag = proteinTagOf(slot.dinner);
       // Don't displace another required-tag pick
       if (slotTag && proteinRequirements.includes(slotTag)) continue;
@@ -2993,7 +3008,7 @@ Return ONLY JSON, no prose, no markdown.`;
      nothing downstream saw anything to fix. */
   enforceDayPins({
     result, pins: dayPins, candidates: effectiveCandidates, usedThisRun,
-    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks, slot.d),
   });
 
   return result;
@@ -3052,8 +3067,9 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
     // Tier model (replaces effortCount/preferLight/requireLight):
     //   'breakfast' → Light required
     //   'task'      → Medium preferred (Light fallback), no Heavy
+    //   'monday'    → Light preferred, Medium ok, never Heavy
     //   'free'      → Medium or Heavy required (no Light)
-    const tier = effortTierFor(breakfasts, dayTasks);
+    const tier = effortTierFor(breakfasts, dayTasks, day.d);
     const isFast = tier !== 'free';
 
     const fits = (r) => !usedThisRun.has(r.name);
@@ -3091,7 +3107,7 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
   const pastaCapLocal = pastaCapFrom(proteinCapsLocal);
   enforcePastaCap({
     result, cap: pastaCapLocal, candidates: effectiveCandidates, usedThisRun,
-    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks, slot.d),
   });
   const proteinRequirements = [...parseProteinRequirements(instructions)]
     .filter(tag => proteinCapsLocal[tag] === undefined || proteinCapsLocal[tag] > 0);
@@ -3106,7 +3122,7 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
     let swapped = false;
     for (let i = 0; i < result.length && !swapped; i++) {
       const slot = result[i];
-      const slotTier = slot.tier || effortTierFor(slot.breakfasts, slot.tasks);
+      const slotTier = slot.tier || effortTierFor(slot.breakfasts, slot.tasks, slot.d);
       const slotTag = proteinTagOf(slot.dinner);
       if (slotTag && proteinRequirements.includes(slotTag)) continue;
       const fit = swapInCandidates.find(r =>
@@ -3128,7 +3144,7 @@ function pickPlan({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHi
      only ever true for tasks and breakfasts. */
   enforceDayPins({
     result, pins: parseDinnerDayRequests(instructions), candidates: effectiveCandidates, usedThisRun,
-    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks),
+    tierOf: (slot) => slot.tier || effortTierFor(slot.breakfasts, slot.tasks, slot.d),
   });
 
   return result;
@@ -3166,7 +3182,7 @@ function readPlannedDays({ weekMap, recipeDB, planOffset }) {
       breakfast: breakfasts[0] || null,
       breakfasts,
       tasks: dayTasks,
-      tier: effortTierFor(breakfasts, dayTasks),
+      tier: effortTierFor(breakfasts, dayTasks, day.d),
     };
   }).filter(Boolean);
 }
@@ -4218,7 +4234,7 @@ function dayHasContent(d) {
   return !!(d && d.meals && ((d.meals.b && d.meals.b.length) || d.meals.d || (d.meals.snacks && d.meals.snacks.length) || (d.tasks && d.tasks.length)));
 }
 
-function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, weekMap, setWeekMap, recipeDB, onMealClick }) {
+function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, weekMap, setWeekMap, recipeDB, onMealClick, onSettings }) {
   const [selected, setSelected] = useState(() => {
     const idx = weekData.findIndex(d => d.today);
     return idx >= 0 ? idx : 0;
@@ -4428,6 +4444,8 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
           <span style={{ fontSize:32, color:'var(--purple)', cursor:'pointer', padding:'0 4px' }} onClick={() => goWeek(1)}>›</span>
         </div>
       </div>
+
+      <SignedOutBanner onSettings={onSettings} />
 
       {/* 7-day strip */}
       <div style={{ display:'flex', gap:3, padding:'0 12px 10px' }}>
@@ -6271,6 +6289,49 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
           onClose={() => setConfirmClear(false)}
         />
       )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
+   SIGNED-OUT BANNER
+
+   Every sync trigger — the 30s tick, the focus pull, the heartbeat — is
+   gated on being signed in. Signed out, none of them run, so the app shows
+   whatever is in that device's own storage: on a fresh phone, the sample
+   week it ships with. Nothing said so. Someone opening the link and seeing
+   Chicken Stir Fry on a Monday in April has no way to tell that they are
+   looking at a demo rather than a plan that hasn't been updated.
+
+   So say it, on the screen they are actually looking at.
+═══════════════════════════════════════════ */
+function SignedOutBanner({ onSettings }) {
+  const [user, setUser] = useState(() => (window.AB_FB ? window.AB_FB.getUser() : null));
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!window.AB_FB) return;
+    // onAuth fires once with the restored session, so nothing flashes up
+    // during the moment before Firebase has answered.
+    const off = window.AB_FB.onAuth(u => { setUser(u); setReady(true); });
+    return off;
+  }, []);
+  if (!ready || user) return null;
+  return (
+    <div
+      onClick={onSettings}
+      style={{
+        margin:'0 12px 8px', padding:'10px 12px', borderRadius:10,
+        background:'#2a1420', border:'1.5px solid #5a2030',
+        color:'#e29090', fontSize:15, lineHeight:1.45, cursor:'pointer',
+        display:'flex', gap:10, alignItems:'center',
+      }}
+    >
+      <span style={{ fontSize:20 }}>⚠️</span>
+      <span style={{ flex:1 }}>
+        <b>Not signed in</b> — this is the sample week, not the real plan, and it
+        won't update. Tap to sign in.
+      </span>
+      <span style={{ color:'var(--purple-light)', fontSize:19 }}>›</span>
     </div>
   );
 }
@@ -9670,6 +9731,7 @@ function App() {
           const r = recipeDB.find(x => x.name === name);
           if (r) handleRecipeDetail(r);
         }}
+        onSettings={() => setShowSettings(true)}
       />;
       case 1: return <GroceryScreen
         onTab={handleTab}
