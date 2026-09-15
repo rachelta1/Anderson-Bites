@@ -639,6 +639,7 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as fbSignOut,
+  sendPasswordResetEmail,
 } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js';
 import {
   getFirestore, doc, getDoc, setDoc, serverTimestamp,
@@ -1088,6 +1089,7 @@ window.AB_FB = {
   },
   signIn: (email, password) => signInWithEmailAndPassword(auth, email, password),
   createAccount: (email, password) => createUserWithEmailAndPassword(auth, email, password),
+  resetPassword: (email) => sendPasswordResetEmail(auth, email),
   signOut: async () => {
     if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
     await fbSignOut(auth);
@@ -6296,14 +6298,16 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
 /* ═══════════════════════════════════════════
    SIGNED-OUT BANNER
 
-   Every sync trigger — the 30s tick, the focus pull, the heartbeat — is
-   gated on being signed in. Signed out, none of them run, so the app shows
-   whatever is in that device's own storage: on a fresh phone, the sample
-   week it ships with. Nothing said so. Someone opening the link and seeing
-   Chicken Stir Fry on a Monday in April has no way to tell that they are
-   looking at a demo rather than a plan that hasn't been updated.
+   Every sync trigger — the 30s tick, the focus pull, the heartbeat — is gated
+   on being signed in, and the manual refresh button hides itself when it
+   isn't. Signed out, none of them run and nothing said anything.
 
-   So say it, on the screen they are actually looking at.
+   But "signed out" is not one situation, and the first version of this banner
+   got that wrong: it told someone their real, current plan was "the sample
+   week". A phone can hold perfectly good data and still lose its session —
+   the app's data lives in localStorage while the sign-in lives in IndexedDB,
+   and iOS can clear those independently. So ask whether this device has ever
+   synced, and say the true thing either way.
 ═══════════════════════════════════════════ */
 function SignedOutBanner({ onSettings }) {
   const [user, setUser] = useState(() => (window.AB_FB ? window.AB_FB.getUser() : null));
@@ -6316,6 +6320,12 @@ function SignedOutBanner({ onSettings }) {
     return off;
   }, []);
   if (!ready || user) return null;
+  // Has this device ever been in touch with the cloud? If not, what's on
+  // screen is whatever it shipped with.
+  let everSynced = false;
+  try {
+    everSynced = !!(localStorage.getItem('ab.lastSync') || localStorage.getItem('ab.lastCloudCheck'));
+  } catch (e) { /* storage unavailable — treat as never synced */ }
   return (
     <div
       onClick={onSettings}
@@ -6328,8 +6338,11 @@ function SignedOutBanner({ onSettings }) {
     >
       <span style={{ fontSize:20 }}>⚠️</span>
       <span style={{ flex:1 }}>
-        <b>Not signed in</b> — this is the sample week, not the real plan, and it
-        won't update. Tap to sign in.
+        <b>Not signed in</b>{everSynced
+          ? <> — what's here is safe, but it has stopped syncing. Changes won't reach
+              the other phones, and theirs won't reach this one. Tap to sign back in.</>
+          : <> — this is the sample week, not the real plan, and it won't update.
+              Tap to sign in.</>}
       </span>
       <span style={{ color:'var(--purple-light)', fontSize:19 }}>›</span>
     </div>
@@ -6551,10 +6564,31 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       else if (code === 'auth/email-already-in-use') setAuthMsg('Already exists — tap Sign in');
       else if (code === 'auth/weak-password') setAuthMsg('Password too weak (6+ chars)');
       else if (code === 'auth/invalid-email') setAuthMsg('Invalid email');
-      else setAuthMsg(err.message || 'Sign-in failed');
+      else if (code === 'auth/too-many-requests') setAuthMsg('Too many attempts — wait a few minutes, or reset your password');
+      else if (code === 'auth/network-request-failed') setAuthMsg('No connection to the sign-in service — check the network and try again');
+      else if (code === 'auth/user-disabled') setAuthMsg('That account is disabled');
+      else setAuthMsg((err.message || 'Sign-in failed') + (code ? ` [${code}]` : ''));
+      if (code) console.warn('[AB auth] ' + code, err);
     } finally {
       setBusy(false);
     }
+  };
+
+  /* Until now there was no way back in: forget the password and the account —
+     and the cloud copy of everything in it — was simply unreachable. */
+  const doReset = async () => {
+    const e = emailIn.trim();
+    if (!e) { setAuthMsg('Type your email above first, then tap this'); return; }
+    setBusy(true);
+    try {
+      await window.AB_FB.resetPassword(e);
+      setAuthMsg('Reset link sent to ' + e + ' — check your inbox (and spam)');
+    } catch (err) {
+      const code = err.code || '';
+      if (code === 'auth/user-not-found') setAuthMsg('No account with that email');
+      else if (code === 'auth/invalid-email') setAuthMsg('That email doesn\u2019t look right');
+      else setAuthMsg((err.message || 'Could not send the reset link') + (code ? ` [${code}]` : ''));
+    } finally { setBusy(false); }
   };
 
   const doSignOut = async () => {
@@ -6610,6 +6644,10 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
               autoCorrect="off"
             />
             {authMsg && <div style={{ fontSize:14, color:'#f88', marginTop:6 }}>{authMsg}</div>}
+            <div
+              onClick={busy ? null : doReset}
+              style={{ fontSize:15, color:'var(--purple-light)', marginTop:8, cursor:'pointer', display:'inline-block' }}
+            >Forgot password?</div>
             <div style={{ display:'flex', gap:8, marginTop:8 }}>
               <div className="gen-btn" style={{ flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)' }} onClick={busy ? null : () => doAuth('create')}>
                 {busy ? '…' : 'Create account'}
