@@ -634,7 +634,10 @@ window.addEventListener('error', e => {
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js';
 import {
-  getAuth,
+  initializeAuth,
+  indexedDBLocalPersistence,
+  browserLocalPersistence,
+  inMemoryPersistence,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -661,8 +664,40 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
+/* Persistence, spelled out rather than left to the default.
+
+   Firebase stores the session in IndexedDB. iOS clears that on its own
+   schedule and blocks it outright in some states — and when it is
+   unavailable the sign-in call does not fail, it HANGS, leaving the button
+   spinning with nothing to report. Naming the chain means it falls back to
+   localStorage (which is where the app's own data already lives, and which
+   evidently survives when IndexedDB doesn't) and then to memory, where
+   sign-in at least works for the session even if it won't be remembered. */
+const auth = initializeAuth(app, {
+  persistence: [indexedDBLocalPersistence, browserLocalPersistence, inMemoryPersistence],
+});
 const db = getFirestore(app);
+
+/* Which storage backends this browser will actually give us. Surfaced in
+   Settings: when sign-in misbehaves, the first useful question is whether the
+   browser is handing out storage at all, and that shouldn't need a debugger
+   on someone's phone. */
+const storageProbe = { localStorage: false, indexedDB: false };
+try {
+  localStorage.setItem('ab.__probe', '1');
+  localStorage.removeItem('ab.__probe');
+  storageProbe.localStorage = true;
+} catch (e) { storageProbe.localStorageError = String(e && e.name || e); }
+try {
+  if (typeof indexedDB !== 'undefined' && indexedDB) {
+    const req = indexedDB.open('ab-probe', 1);
+    req.onsuccess = () => { storageProbe.indexedDB = true; try { req.result.close(); } catch {} };
+    req.onerror = () => { storageProbe.indexedDBError = String((req.error && req.error.name) || 'error'); };
+    req.onblocked = () => { storageProbe.indexedDBError = 'blocked'; };
+  } else {
+    storageProbe.indexedDBError = 'unavailable';
+  }
+} catch (e) { storageProbe.indexedDBError = String(e && e.name || e); }
 
 // Keys we don't sync — purely local bookkeeping.
 const SKIP_PREFIXES = ['ab.migration.', 'ab.lastSync', 'ab.lastCloudCheck'];
@@ -1087,9 +1122,17 @@ window.AB_FB = {
     cb(currentUser);
     return () => authListeners.delete(cb);
   },
-  signIn: (email, password) => signInWithEmailAndPassword(auth, email, password),
-  createAccount: (email, password) => createUserWithEmailAndPassword(auth, email, password),
-  resetPassword: (email) => sendPasswordResetEmail(auth, email),
+  /* Every auth call is bounded. Without this a hung request — no network, or
+     a persistence backend the browser won't open — leaves the button spinning
+     forever with nothing on screen to say why. A timeout is not a fix for the
+     underlying problem, but it turns a dead button into a sentence. */
+  signIn: (email, password) =>
+    withTimeout(signInWithEmailAndPassword(auth, email, password), 20000, 'sign-in'),
+  createAccount: (email, password) =>
+    withTimeout(createUserWithEmailAndPassword(auth, email, password), 20000, 'create account'),
+  resetPassword: (email) =>
+    withTimeout(sendPasswordResetEmail(auth, email), 20000, 'password reset'),
+  storageProbe: () => ({ ...storageProbe }),
   signOut: async () => {
     if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
     await fbSignOut(auth);
@@ -6295,6 +6338,28 @@ function GroceryScreen({ onTab, items, setItems, pantryStaples, setPantryStaples
   );
 }
 
+/* Whether the browser is handing out storage at all. Sign-in problems on iOS
+   usually come down to this, and it is the one fact worth having before
+   guessing at anything else. Only rendered when signed out, where it matters. */
+function StorageProbeLine() {
+  const [p, setP] = useState(null);
+  useEffect(() => {
+    if (!window.AB_FB || !window.AB_FB.storageProbe) return;
+    // The IndexedDB probe is async; give it a moment to answer.
+    const t = setTimeout(() => setP(window.AB_FB.storageProbe()), 600);
+    return () => clearTimeout(t);
+  }, []);
+  if (!p) return null;
+  const bad = !p.localStorage || !p.indexedDB;
+  if (!bad) return null;
+  return (
+    <div style={{ fontSize:13, color:'#e2c890', marginTop:6, lineHeight:1.5, fontFamily:'monospace' }}>
+      storage: localStorage {p.localStorage ? '✓' : '✗ ' + (p.localStorageError || '')}
+      {' · '}indexedDB {p.indexedDB ? '✓' : '✗ ' + (p.indexedDBError || '')}
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════
    SIGNED-OUT BANNER
 
@@ -6567,8 +6632,14 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
       else if (code === 'auth/too-many-requests') setAuthMsg('Too many attempts — wait a few minutes, or reset your password');
       else if (code === 'auth/network-request-failed') setAuthMsg('No connection to the sign-in service — check the network and try again');
       else if (code === 'auth/user-disabled') setAuthMsg('That account is disabled');
+      else if (/timed out/i.test(err.message || '')) {
+        const probe = window.AB_FB.storageProbe ? window.AB_FB.storageProbe() : {};
+        setAuthMsg(probe.indexedDB === false
+          ? 'Sign-in timed out, and this browser is refusing app storage. Close any Private tab, or try Safari rather than an in-app browser.'
+          : 'Sign-in timed out — the sign-in service didn\u2019t answer. Check the connection and try again.');
+      }
       else setAuthMsg((err.message || 'Sign-in failed') + (code ? ` [${code}]` : ''));
-      if (code) console.warn('[AB auth] ' + code, err);
+      console.warn('[AB auth] ' + (code || err.message), err);
     } finally {
       setBusy(false);
     }
@@ -6648,12 +6719,13 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
               onClick={busy ? null : doReset}
               style={{ fontSize:15, color:'var(--purple-light)', marginTop:8, cursor:'pointer', display:'inline-block' }}
             >Forgot password?</div>
+            <StorageProbeLine />
             <div style={{ display:'flex', gap:8, marginTop:8 }}>
               <div className="gen-btn" style={{ flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)' }} onClick={busy ? null : () => doAuth('create')}>
-                {busy ? '…' : 'Create account'}
+                {busy ? 'working…' : 'Create account'}
               </div>
               <div className="gen-btn" style={{ flex:1 }} onClick={busy ? null : () => doAuth('signin')}>
-                {busy ? '…' : 'Sign in'}
+                {busy ? 'signing in…' : 'Sign in'}
               </div>
             </div>
             <div style={{ fontSize:13, color:'var(--text-dimmer)', marginTop:6, lineHeight:1.4 }}>
