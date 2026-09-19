@@ -4279,7 +4279,7 @@ function dayHasContent(d) {
   return !!(d && d.meals && ((d.meals.b && d.meals.b.length) || d.meals.d || (d.meals.snacks && d.meals.snacks.length) || (d.tasks && d.tasks.length)));
 }
 
-function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, weekMap, setWeekMap, recipeDB, onMealClick, onSettings }) {
+function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, weekMap, setWeekMap, recipeDB, onMealClick, onSettings, setGroceryList }) {
   const [selected, setSelected] = useState(() => {
     const idx = weekData.findIndex(d => d.today);
     return idx >= 0 ? idx : 0;
@@ -4407,6 +4407,36 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
     if (!dayHasContent(draft)) draft.planned = false;
   };
 
+  /* Grocery rows record which meal put them there, as "Sep 14 · Beef Chili".
+     Moving the meal used to leave that date behind, and the date is not
+     decoration: the weekly sweep keeps a ticked item only while its meal is
+     still to come, and applyPlan drops rows whose dates have all passed. A
+     meal pushed later in the week would therefore be judged on the day it
+     used to be on, and its shopping swept out from under it — then re-added
+     by the next plan, which reads as items turning up unticked for no reason.
+     Only the date moves; the recipe half and everything else is untouched. */
+  const retagGroceries = (recipeName, fromDt, toDt) => {
+    if (!setGroceryList || !recipeName || !fromDt || !toDt || fromDt === toDt) return;
+    setGroceryList(prev => {
+      let touched = false;
+      const next = (prev || []).map(it => {
+        if (!it || !it.src) return it;
+        const segs = it.src.split(' + ').map(seg => {
+          const t = seg.trim();
+          if (t !== `${fromDt} · ${recipeName}`) return seg;
+          touched = true;
+          return `${toDt} · ${recipeName}`;
+        });
+        return touched ? { ...it, src: segs.join(' + ') } : it;
+      });
+      return touched ? next : prev;
+    });
+  };
+  const dtOf = (weekArr, idx) => {
+    const d = weekArr && weekArr[idx];
+    return d ? `${d.month} ${d.n}` : null;
+  };
+
   const moveMeal = (slot, targetOffset, targetIdx) => {
     if (targetOffset === weekOffset && targetIdx === selected) { setModal(null); return; }
     const sourceDay = weekData[selected];
@@ -4423,6 +4453,14 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
       recipeName = (sourceDay.meals.snacks || [])[slot]; mealType = 'snack';
     }
     if (!recipeName) { setModal(null); return; }
+
+    if (mealType !== 'task') {
+      const fromDt = dtOf(weekData, selected);
+      const toDt = targetOffset === weekOffset
+        ? dtOf(weekData, targetIdx)
+        : dtOf(mergeWeek(buildWeek(targetOffset), weekMap && weekMap[targetOffset]), targetIdx);
+      retagGroceries(recipeName, fromDt, toDt);
+    }
 
     if (targetOffset === weekOffset) {
       // Same week — single-week write via setWeekData (existing sync path).
@@ -7445,9 +7483,14 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
           const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
           // Add this recipe's portion on top of what's there — unless this
           // recipe already contributed (same src), which must not double it.
-          const q = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, parsed.q]);
+          // Un-tick only when the amount actually grew. Re-tapping an
+          // ingredient this recipe already put on the list adds nothing, so
+          // clearing the tick just made a bought item look unbought.
+          const alreadyMine = sSet.has(recipeName);
+          const q = alreadyMine ? it.q : sumQtyStrings([it.q, parsed.q]);
           sSet.add(recipeName);
-          next[idx] = { ...it, q, n: it.edited ? it.n : preferredItemName(it.n, itemName, q), src: [...sSet].join(' + '), done: false };
+          next[idx] = { ...it, q, n: it.edited ? it.n : preferredItemName(it.n, itemName, q),
+                        src: [...sSet].join(' + '), done: alreadyMine ? it.done : false };
         } else {
           next.push({ q: parsed.q || '', n: itemName, done: false, src: recipeName });
         }
@@ -7519,9 +7562,11 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
           if (idx >= 0) {
             const it = next[idx];
             const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
-            const nq = sSet.has(recipeName) ? it.q : sumQtyStrings([it.q, q]);
+            const alreadyMine = sSet.has(recipeName);
+            const nq = alreadyMine ? it.q : sumQtyStrings([it.q, q]);
             sSet.add(recipeName);
-            next[idx] = { ...it, q: nq, n: it.edited ? it.n : preferredItemName(it.n, name, nq), src: [...sSet].join(' + '), done: false };
+            next[idx] = { ...it, q: nq, n: it.edited ? it.n : preferredItemName(it.n, name, nq),
+                          src: [...sSet].join(' + '), done: alreadyMine ? it.done : false };
           } else {
             next.push({ q, n: name, done: false, src: recipeName });
           }
@@ -9842,6 +9887,7 @@ function App() {
           if (r) handleRecipeDetail(r);
         }}
         onSettings={() => setShowSettings(true)}
+        setGroceryList={setGroceryList}
       />;
       case 1: return <GroceryScreen
         onTab={handleTab}
