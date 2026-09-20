@@ -2450,7 +2450,9 @@ function assignTasks(dinnerDays, _ignored, activeTasks) {
   const taken = new Set();
   const isLaundry = (n) => /laundry/i.test(n || '');
   for (const taskName of activeTasks) {
-    const eligible = dinnerDays.filter(d => !taken.has(d.dt));
+    // A chore is effort too, so Monday goes to the back of the queue here as
+    // well — it still gets one if there's nowhere else left.
+    const eligible = mondayLast(dinnerDays.filter(d => !taken.has(d.dt)));
     if (!eligible.length) continue;
     let pick;
     if (isLaundry(taskName)) {
@@ -2470,11 +2472,20 @@ function assignTasks(dinnerDays, _ignored, activeTasks) {
 // have a task (so we don't triple up). Overflow falls back onto task days.
 // Returns { dt: [names...] } — multiple breakfasts can land on the same day if
 // the user explicitly asks (handled by assignBreakfastsWithInstructions).
+/* Monday is the last day to hand breakfast prep to. A Monday already cooking
+   dinner shouldn't also be cooking breakfast — that's two jobs on the day
+   least able to take them. It still gets one if there are more breakfasts
+   than other days to put them on, which is the "unless necessary" part; and
+   an explicit "pancakes monday" is placed before this ever runs. */
+function mondayLast(days) {
+  return [...(days || [])].sort((a, b) => (a.d === 'Mon' ? 1 : 0) - (b.d === 'Mon' ? 1 : 0));
+}
+
 function assignBreakfasts(dinnerDays, tasksByDt, activeBreakfasts) {
   const breakfastByDt = {};
   const noTask = dinnerDays.filter(d => !(tasksByDt[d.dt] && tasksByDt[d.dt].length));
   const withTask = dinnerDays.filter(d => (tasksByDt[d.dt] && tasksByDt[d.dt].length));
-  const order = [...noTask, ...withTask];
+  const order = [...mondayLast(noTask), ...mondayLast(withTask)];
   activeBreakfasts.slice(0, order.length).forEach((name, i) => {
     (breakfastByDt[order[i].dt] = breakfastByDt[order[i].dt] || []).push(name);
   });
@@ -2544,8 +2555,9 @@ function assignBreakfastsWithInstructions(dinnerDays, tasksByDt, activeBreakfast
     if (!targetDt) {
       // Pick a clean (no task, no breakfast yet) day for the group
       const breakfastedDts = new Set(Object.keys(breakfastByDt));
-      const candidate = dinnerDays.find(d => !taskDays.has(d.dt) && !breakfastedDts.has(d.dt))
-                     || dinnerDays.find(d => !breakfastedDts.has(d.dt))
+      const byPreference = mondayLast(dinnerDays);
+      const candidate = byPreference.find(d => !taskDays.has(d.dt) && !breakfastedDts.has(d.dt))
+                     || byPreference.find(d => !breakfastedDts.has(d.dt))
                      || dinnerDays[0];
       if (!candidate) continue;
       targetDt = candidate.dt;
@@ -2566,7 +2578,7 @@ function assignBreakfastsWithInstructions(dinnerDays, tasksByDt, activeBreakfast
   const breakfastedDts = new Set(Object.keys(breakfastByDt));
   const cleanOpen    = dinnerDays.filter(d => !taskDays.has(d.dt) && !breakfastedDts.has(d.dt));
   const taskOnlyOpen = dinnerDays.filter(d => taskDays.has(d.dt) && !breakfastedDts.has(d.dt));
-  const order = [...cleanOpen, ...taskOnlyOpen];
+  const order = [...mondayLast(cleanOpen), ...mondayLast(taskOnlyOpen)];
   remaining.slice(0, order.length).forEach((name, i) => {
     (breakfastByDt[order[i].dt] = breakfastByDt[order[i].dt] || []).push(name);
   });
@@ -2686,7 +2698,7 @@ function seededShuffle(arr, seed) {
   return out;
 }
 
-async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions, seed, excludeDinners }) {
+async function pickPlanWithLLM({ apiKey, recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions, seed, excludeDinners, adjustNote, currentPlan }) {
   const ctx = buildPlanContext({ recipeDB, days, breakfastPicks, tasks, avoidWeeks, cookingHistory, weekMap, instructions });
   const { dinnerDays, breakfastByDt, tasksByDt, byName, dinnerCandidates, recent } = ctx;
   if (dinnerDays.length === 0 || dinnerCandidates.length === 0) {
@@ -2777,9 +2789,21 @@ For each day, return ONE dinner (by exact name from the library) and a list of t
 
 (10) PASTA CAP is a HARD limit. The user prompt includes PASTA_MAX — the most pasta dinners the plan may contain. A dinner counts if its library entry has "isPasta": true. That includes dishes that also carry a protein tag: a chicken pasta counts. Default is one per week; respect the number given.
 
+${adjustNote ? `
+(12) THIS IS AN ADJUSTMENT, NOT A FRESH PLAN. The user is looking at the plan in CURRENT PLAN below and has asked for one specific change, in ADJUSTMENT REQUEST. Start FROM that plan and change only what they asked. Keeping a dinner exactly where it is, is the correct answer for every day the request doesn't touch — do not reach for variety, and do not swap anything "while you're there". If they ask to swap two days, the two dinners trade places and nothing else moves. Rules (1)-(11) still hold for the result.` : ''}
+
 Return ONLY JSON, no prose, no markdown.`;
 
-  const user = `USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nDAY_PINS (weekday → protein the user tied to it; that exact day must have a dinner carrying that tag):\n${JSON.stringify(dayPins)}\n\nPASTA_MAX (hard maximum — dinners whose library entry has "isPasta": true, including pasta dishes that also carry a protein tag):\n${pastaCap}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
+  const adjustBlock = adjustNote
+    ? `ADJUSTMENT REQUEST (what to change about the plan below — change nothing else):\n"""${adjustNote}"""\n\nCURRENT PLAN (what the user is looking at right now):\n${JSON.stringify(
+        (currentPlan || []).map(p => ({
+          dt: p.dt, weekday: p.d,
+          dinner: p.dinner ? p.dinner.name : null,
+          breakfasts: (p.breakfasts || []).map(b => b && b.name).filter(Boolean),
+          tasks: p.tasks || [],
+        })), null, 2)}\n\n`
+    : '';
+  const user = `${adjustBlock}USER INSTRUCTIONS:\n"""${instructions || ''}"""\n\nPROTEIN_CAPS (hard maximums — number of dinners with each protein tag the plan may contain; missing keys = unlimited):\n${JSON.stringify(proteinCaps)}\n\nDAY_PINS (weekday → protein the user tied to it; that exact day must have a dinner carrying that tag):\n${JSON.stringify(dayPins)}\n\nPASTA_MAX (hard maximum — dinners whose library entry has "isPasta": true, including pasta dishes that also carry a protein tag):\n${pastaCap}\n\nPROTEIN_REQUIRED (proteins the user mentioned — at least one dinner with each tag MUST appear in the plan if a matching recipe exists in the library):\n${JSON.stringify(proteinRequirements)}\n\nDAYS TO PLAN (in order):\n${JSON.stringify(dayInfo, null, 2)}\n\nACTIVE TASKS (must each be placed at most once across the plan):\n${JSON.stringify(activeTaskNames)}\n\nDINNER LIBRARY:\n${JSON.stringify(slim, null, 2)}\n\nRECENTLY COOKED (avoid if possible):\n${JSON.stringify(recentList)}\n\nReturn JSON in this exact shape:\n{\n  "picks": [\n    { "dt": "<dt from DAYS TO PLAN>", "dinnerName": "<exact name from DINNER LIBRARY>", "tasks": ["<task name>", ...], "reason": "<one short sentence>" }\n  ]\n}`;
 
   const text = await callClaude({ apiKey, system, user, thinking: NO_THINKING });
   const parsed = extractJson(text);
@@ -2879,10 +2903,16 @@ Return ONLY JSON, no prose, no markdown.`;
       // Exclusion: if we filtered the candidate pool for the LLM, anything
       // outside it is a violation of the user's reroll request.
       if (usingExclusion && excludeSet.has(recipe.name)) return false;
-      // Tier gate. If the recipe doesn't satisfy the tier but the pool
-      // still has something that does, reject the LLM pick so the fallback
-      // chooses a tier-satisfying alternative.
-      if (!tierAllowsComplexity(tier, recipe.complexity)) {
+      /* Tier gate. If the recipe doesn't satisfy the tier but the pool still
+         has something that does, reject the LLM pick so the fallback chooses
+         a tier-satisfying alternative.
+
+         Not during an adjustment, though. The tiers are a guess about how
+         much effort a day can take; "swap Monday and Thursday" is the user
+         saying what they want. Enforcing the guess there silently replaced
+         both dinners with different recipes — the swap appeared to work while
+         quietly rerolling the two days it touched. */
+      if (!adjustNote && !tierAllowsComplexity(tier, recipe.complexity)) {
         const anyTierFit = effectiveCandidates.some(r =>
           tierAllowsComplexity(tier, r.complexity) && !usedThisRun.has(r.name)
         );
@@ -5330,6 +5360,7 @@ function RecipePeekSheet({ recipe, onClose }) {
    plan if no day conflicts). Recipe rows are tappable → opens RecipePeekSheet
    layered on top so the user can inspect a dish before confirming/rerolling. ── */
 function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed, swapped }) {
+  const [rerollNote, setRerollNote] = useState('');
   // Lookup table from weekOffset+slotIdx → friendly day chip ({ label, n, month, d })
   const dayInfoFor = (weekOffset, slotIdx) => {
     const wk = weekMap && weekMap[weekOffset];
@@ -5676,27 +5707,45 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
           </div>
         </div>
 
+        {/* Say what should change, instead of only being able to reroll the
+            whole thing and hope. With something typed the button stops being a
+            dice roll and becomes "do this" — the plan on screen is sent along
+            and only what's asked for moves. */}
+        {onReroll && (
+          <input
+            className="task-input"
+            value={rerollNote}
+            onChange={e => setRerollNote(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !rerolling) onReroll(keptKeys, rerollNote); }}
+            placeholder='change something? e.g. "swap Monday and Thursday"'
+            style={{ marginTop:10, fontSize:17 }}
+          />
+        )}
         <div style={{ display:'flex', gap:8, padding:'12px 0 4px' }}>
           {/* No reroll on a re-plan: it re-runs the Auto-Plan settings from
               scratch, which would discard the swap the user just asked for. */}
           {onReroll && (
           <div
             className="gen-btn"
-            onClick={rerolling ? undefined : () => onReroll(keptKeys)}
+            onClick={rerolling ? undefined : () => onReroll(keptKeys, rerollNote)}
             style={
               rerolling
                 ? { flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)', opacity:0.6, cursor:'wait' }
                 : { flex:1, background:'#202030', color:'var(--purple-light)', border:'1.5px solid var(--border)' }
             }
-            title={keptKeys.size > 0
-              ? `Keep ${keptKeys.size} dinner${keptKeys.size === 1 ? '' : 's'}, reroll the rest`
-              : 'Pick a different set of recipes with the same constraints'}
+            title={rerollNote.trim()
+              ? 'Apply what you typed to this plan'
+              : keptKeys.size > 0
+                ? `Keep ${keptKeys.size} dinner${keptKeys.size === 1 ? '' : 's'}, reroll the rest`
+                : 'Pick a different set of recipes with the same constraints'}
           >
             {rerolling
-              ? '✦ Re-rolling…'
-              : keptKeys.size > 0
-                ? `🎲 Reroll others (keep ${keptKeys.size})`
-                : `🎲 Reroll${rerollSeed != null ? ` (#${rerollSeed + 1})` : ''}`}
+              ? '✦ Working…'
+              : rerollNote.trim()
+                ? '✦ Make this change'
+                : keptKeys.size > 0
+                  ? `🎲 Reroll others (keep ${keptKeys.size})`
+                  : `🎲 Reroll${rerollSeed != null ? ` (#${rerollSeed + 1})` : ''}`}
           </div>
           )}
           <div
@@ -8693,7 +8742,10 @@ function AutoPlanScreen({
     const effDays = overrides.days || days;
     const effBreakfastPicks = overrides.breakfastPicks || breakfastPicks;
     const effTasks = overrides.tasks || tasks;
-    const useLlm = !!(apiKey && instructions && instructions.trim());
+    const adjustNote = (overrides.note || '').trim();
+    // An adjustment is a sentence about a plan; only the model can act on it,
+    // so it forces the LLM path even when the standing instructions are empty.
+    const useLlm = !!(apiKey && ((instructions && instructions.trim()) || adjustNote));
     let perDay;
     let llmUsed = false;
     let llmFailureNote = '';
@@ -8705,6 +8757,8 @@ function AutoPlanScreen({
           apiKey, recipeDB, days: effDays, breakfastPicks: effBreakfastPicks, tasks: effTasks,
           avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
           excludeDinners,
+          adjustNote: adjustNote || null,
+          currentPlan: overrides.currentPlan || null,
         });
         llmUsed = true;
       } catch (e) {
@@ -8723,7 +8777,9 @@ function AutoPlanScreen({
         avoidWeeks: AVOID_OPTS[avoidIdx], cookingHistory, weekMap, instructions, seed,
         excludeDinners,
       });
-      if (!apiKey && instructions && instructions.trim()) {
+      if (!apiKey && adjustNote) {
+        llmFailureNote = 'That needs an API key — without one the reroll picks fresh recipes and can\u2019t act on a note.';
+      } else if (!apiKey && instructions && instructions.trim()) {
         llmFailureNote = 'No API key — dinner selection is rule-based, but weekday + same-day instructions still apply.';
       }
     }
@@ -8846,8 +8902,9 @@ function AutoPlanScreen({
   // keptKeys: optional Set<"weekOffset-slotIdx"> of slots the user wants
   // to LOCK — those dinners are preserved as-is and the picker only refills
   // the remaining unlocked days.
-  const handleReroll = async (keptKeys) => {
+  const handleReroll = async (keptKeys, note) => {
     if (genLoading || !previewModal) return;
+    const adjustNote = (note || '').trim();
     const nextRerollSeed = rerollSeed + 1;
     const nextPickerSeed = pickerSeed + 1;
     const currentPerDay = previewModal.perDay || [];
@@ -8887,13 +8944,28 @@ function AutoPlanScreen({
     // the plan currently in front of the user. The kept dinners are also
     // excluded — the picker shouldn't try to place a kept dinner on an
     // unlocked day too (that would create a duplicate).
-    const carryOver = [...new Set([...recentDinners, ...currentPlanDinners])];
+    /* Normally a reroll excludes what's on screen — the point is different
+       recipes. With a note the point is the opposite: "swap Monday and
+       Thursday" means keep these and move them, so excluding them would make
+       the request impossible to satisfy. */
+    /* And the current dinners have to come OUT of the recent-window too. That
+       window already holds them — every generate appends to it — so leaving it
+       alone would have the picker reject the very dinners the note asks it to
+       keep, and quietly fill the week with fresh ones instead. */
+    const onScreen = new Set(currentPlanDinners);
+    const carryOver = adjustNote
+      ? recentDinners.filter(n => !onScreen.has(n))
+      : [...new Set([...recentDinners, ...currentPlanDinners])];
 
     setRerollSeed(nextRerollSeed);
     setPickerSeed(nextPickerSeed);
     setLastConstraintKey(currentConstraintKey);
 
-    const newPicks = await runPicker(nextPickerSeed, carryOver, overrides);
+    const newPicks = await runPicker(nextPickerSeed, carryOver, {
+      ...overrides,
+      note: adjustNote,
+      currentPlan: adjustNote ? currentPerDay : null,
+    });
 
     // Merge: kept entries + new picks for unlocked days. Sort calendar order.
     const merged = [...keptEntries, ...(newPicks || [])].sort((a, b) => {
