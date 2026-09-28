@@ -4812,6 +4812,56 @@ function formatQtyNum(x) {
   return String(Math.round(x * 100) / 100);
 }
 
+/* ── Scaling a recipe ──
+   "I always make double" shouldn't mean doing the arithmetic in your head
+   every time, or worse, halving the grocery list by forgetting to.
+
+   Only the leading number moves. A unit written into the line stays as it is
+   — "1 (15 oz) can" doubled is two of the same tin, not one twice the size —
+   and anything with no number at all ("salt to taste", "olive oil") is left
+   alone, because there is nothing there to double. */
+function scaleQtyString(q, factor) {
+  const f = Number(factor) || 1;
+  if (f === 1) return q;
+  const segs = String(q || '').split(' + ').map(x => x.trim()).filter(Boolean);
+  if (!segs.length) return q;
+  const out = segs.map(seg => {
+    const p = parseQtySegment(seg);
+    if (!p) return seg;                       // no leading number — leave it
+    const n = formatQtyNum(p.num * f);
+    if (!p.rawUnit) return n;
+    if (p.unitInfo) return `${n} ${p.num * f > 1 ? p.unitInfo.many : p.unitInfo.one}`;
+    // Unknown unit text is kept verbatim, but a known trailing unit word is
+    // pluralised the way sumQtyStrings does it ("(15 oz) can" → "cans").
+    const words = p.rawUnit.split(/\s+/);
+    const last = QTY_UNIT_TABLE[words[words.length - 1].toLowerCase()];
+    const unitStr = (last && p.num * f > 1)
+      ? [...words.slice(0, -1), last.many].join(' ')
+      : p.rawUnit;
+    return `${n} ${unitStr}`;
+  });
+  return out.join(' + ');
+}
+
+// How many times over this recipe is made. Stored on the recipe so a choice
+// made once holds for every future plan and grocery add.
+const recipeScale = (r) => {
+  const n = r && Number(r.scale);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+};
+
+// The recipe's ingredient lines at its chosen scale.
+function scaledQtyLines(r) {
+  const lines = (r && Array.isArray(r.ingredientsWithQty)) ? r.ingredientsWithQty : [];
+  const f = recipeScale(r);
+  if (f === 1) return lines;
+  return lines.map(line => {
+    const { q, n } = parseItem(line || '');
+    if (!q) return line;                      // nothing to scale
+    return `${scaleQtyString(q, f)} ${n}`.trim();
+  });
+}
+
 function sumQtyStrings(parts) {
   const segs = (parts || [])
     .flatMap(p => String(p || '').split(' + '))
@@ -5359,12 +5409,20 @@ function RecipePeekSheet({ recipe, onClose }) {
    to the existing-meals overwrite/append flow (or directly applies the
    plan if no day conflicts). Recipe rows are tappable → opens RecipePeekSheet
    layered on top so the user can inspect a dish before confirming/rerolling. ── */
-function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed, swapped }) {
+function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed, swapped, onClearNote }) {
   const [rerollNote, setRerollNote] = useState('');
   // Lookup table from weekOffset+slotIdx → friendly day chip ({ label, n, month, d })
+  /* A stored slot is only useful here if it actually carries its display
+     fields. A week written by an older build — or by any path that saved a
+     bare slot — has the meals but not the label, and the header rendered
+     "undefined undefined undefined". Rebuild the day from the calendar when
+     that happens; the date is derivable, so there's no reason to show that. */
   const dayInfoFor = (weekOffset, slotIdx) => {
     const wk = weekMap && weekMap[weekOffset];
-    return wk && wk[slotIdx] ? wk[slotIdx] : null;
+    const slot = wk && wk[slotIdx];
+    if (slot && slot.label && slot.month && slot.n != null) return slot;
+    const fresh = buildWeek(weekOffset)[slotIdx];
+    return fresh || null;
   };
 
   // Each item the picker chose, in calendar order. perDay is already in day
@@ -5532,6 +5590,14 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                 ? breakfasts
                 : (breakfast ? [breakfast] : []);
               const slotKey = `${weekOffset}-${slotIdx}`;
+              /* Notes already saved on this day, which the plan didn't put
+                 there. An old one left over from a previous week is invisible
+                 here otherwise — it stays on the calendar, the nanny reads it,
+                 and nobody knew it was still there. */
+              const savedSlot = (weekMap && weekMap[weekOffset]) ? weekMap[weekOffset][slotIdx] : null;
+              const planTaskNames = new Set((dayTasks || []).map(t => typeof t === 'string' ? t : (t && t.name)));
+              const existingNotes = ((savedSlot && savedSlot.tasks) || [])
+                .filter(t => t && !planTaskNames.has(t));
               const isKept = keptKeys.has(slotKey);
               const hasDinner = !!(dinner && dinner.name);
               const isDragSource = drag && drag.fromKey === slotKey;
@@ -5635,6 +5701,25 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                   {(dayTasks || []).map((t, i) => (
                     <div key={`t-${i}`} style={{ fontSize:15, color:'var(--text-dim)', display:'flex', gap:6 }}>
                       <span style={{ width:14 }}>✓</span><span>{t}</span>
+                    </div>
+                  ))}
+                  {existingNotes.map((t, i) => (
+                    <div key={`en-${i}`} style={{
+                      fontSize:15, color:'#e2c890', display:'flex', gap:6, alignItems:'center',
+                      background:'rgba(226,200,144,0.08)', border:'1px solid rgba(226,200,144,0.35)',
+                      borderRadius:6, padding:'5px 8px', marginTop:4,
+                    }}>
+                      <span style={{ width:14 }}>📌</span>
+                      <span style={{ flex:1 }}>
+                        <b>Already on this day:</b> {splitTaskIcon(t).name}
+                      </span>
+                      {onClearNote && (
+                        <span
+                          onClick={(e) => { e.stopPropagation(); onClearNote(weekOffset, slotIdx, t); }}
+                          title="Remove this note"
+                          style={{ cursor:'pointer', padding:'2px 8px', fontSize:19, color:'#e29090', lineHeight:1 }}
+                        >×</span>
+                      )}
                     </div>
                   ))}
                   {!bfList.length && !dinner && !(extras || []).length && !(dayTasks && dayTasks.length) && (
@@ -7471,6 +7556,9 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   const heroUrl = heroIdx < heroSources.length ? heroSources[heroIdx] : null;
 
   const ingredients = Array.isArray(r.ingredients) ? r.ingredients : [];
+  // Every amount on this screen — shown, tapped onto the list, or bulk-added —
+  // comes through here, so the scale can't apply to some of them and not others.
+  const qtyLines = scaledQtyLines(r);
   const steps = Array.isArray(r.steps) ? r.steps : [];
 
   // Map of lowercase name → grocery item, so we can read both presence
@@ -7493,7 +7581,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
   // recipe's contribution; if other recipes also added the item, they keep it.
   const toggleIng = (i, opts = {}) => {
     if (!setGroceryList) return;
-    const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
+    const raw = qtyLines[i] || null;
     const parsed = raw ? parseItem(raw) : { q: '', n: ingredients[i] };
     // opts.name lets the alternatives picker put a chosen option on the list
     // instead of the row's literal text; opts.force skips the toggle so a pick
@@ -7590,7 +7678,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
       if (!ing) return;
       // Derive the list key from the parsed raw line (qty stripped) — the
       // bare ingredient name can differ from the stored item name.
-      const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
+      const raw = qtyLines[i] || null;
       const parsed = raw ? parseItem(raw) : { q: '', n: ing };
       const name = ((parsed.n || ing) || '').trim();
       if (!name) return;
@@ -7668,6 +7756,16 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
       return next;
     }));
     setToast(patch.name && patch.name !== oldName ? 'Recipe renamed' : 'Recipe saved');
+    setTimeout(() => setToast(''), 2200);
+  };
+
+  /* The chosen scale lives on the recipe, not in this screen's state: the
+     point is "I always make double", so it has to hold for the next plan and
+     the next grocery add, not just this visit. */
+  const setScale = (factor) => {
+    if (!setRecipeDB || !r.id) return;
+    setRecipeDB(prev => prev.map(x => x.id === r.id ? { ...x, scale: factor } : x));
+    setToast(factor === 1 ? 'Back to the recipe as written' : `Making ${factor}× from now on`);
     setTimeout(() => setToast(''), 2200);
   };
 
@@ -7844,7 +7942,9 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
               <span style={{ fontSize:17, color:'var(--text-dimmer)' }}>⏱ {r.time || `${r.estMinutes || ''} min`}</span>
               <span style={{ fontSize:17, color:'var(--text-dimmer)' }}>🍽️ {mealKind}</span>
               {typeof r.servings === 'number' && (
-                <span style={{ fontSize:17, color:'var(--text-dimmer)' }}>👥 {r.servings} servings</span>
+                <span style={{ fontSize:17, color:'var(--text-dimmer)' }}>
+                  👥 {formatQtyNum(r.servings * recipeScale(r))} servings
+                </span>
               )}
               <span style={{ fontSize:17, color:'var(--text-dimmer)' }}>used {r.used || 0}×</span>
               {r.url && (
@@ -7859,6 +7959,27 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
             <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginBottom:6 }}>
               {(r.tags || []).filter(t => t !== 'fast').map(t => <div key={t} className="recipe-tag">{t}</div>)}
             </div>
+
+            {setRecipeDB && (
+              <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8, flexWrap:'wrap' }}>
+                <span style={{ fontSize:16, color:'var(--text-dimmer)' }}>Make</span>
+                {[0.5, 1, 2, 3].map(f => {
+                  const on = recipeScale(r) === f;
+                  return (
+                    <span
+                      key={f}
+                      onClick={() => setScale(f)}
+                      style={{
+                        fontSize:18, padding:'5px 14px', borderRadius:8, cursor:'pointer',
+                        border:`1.5px ${on ? 'solid var(--purple)' : 'dashed var(--border)'}`,
+                        background: on ? 'rgba(124,58,237,0.16)' : 'transparent',
+                        color: on ? '#fff' : '#bbb',
+                      }}
+                    >{f === 1 ? '1×' : f === 0.5 ? '½×' : `${f}×`}</span>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="divider" />
 
@@ -7950,7 +8071,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                 <div style={{ fontSize:15, color:'var(--text-dimmer)', padding:'6px 0' }}>No ingredients recorded.</div>
               )}
               {ingredients.map((ing, i) => {
-                const raw = Array.isArray(r.ingredientsWithQty) ? r.ingredientsWithQty[i] : null;
+                const raw = qtyLines[i] || null;
                 const parsed = raw ? parseItem(raw) : null;
                 const groceryItem = groceryByName[(ing || '').toLowerCase()];
                 // An "X or Y" ingredient becomes a set of real options to pick
@@ -8456,7 +8577,7 @@ function AutoPlanScreen({
     let haveSkipped = 0;
     written.forEach(({ dt, recipe }) => {
       const ings = recipe.ingredients || [];
-      const qtys = Array.isArray(recipe.ingredientsWithQty) ? recipe.ingredientsWithQty : [];
+      const qtys = scaledQtyLines(recipe);
       if (!ings.length) {
         // Picker returned a stub (e.g. breakfastName not found in recipeDB) —
         // log so a future overwrite mystery has a fingerprint instead of silently
@@ -8989,6 +9110,23 @@ function AutoPlanScreen({
      losing its meal. Now the target day keeps what it had and gains the moved
      one as an extra; the day it came from is left empty. That matches the week
      view, which already holds a second meal on a day as an extra. */
+  /* Clear a leftover note straight from the preview. The moment you notice it
+     is the moment to deal with it — otherwise it means confirming, going to
+     the week, finding the day and deleting it there. */
+  const clearExistingNote = (weekOffset, slotIdx, taskName) => {
+    setWeekMap(prev => {
+      const week = prev[weekOffset];
+      if (!week || !week[slotIdx]) return prev;
+      const next = { ...prev };
+      next[weekOffset] = week.map((slot, i) => {
+        if (i !== slotIdx || !slot) return slot;
+        const tasks = (slot.tasks || []).filter(t => t !== taskName);
+        return { ...slot, tasks };
+      });
+      return next;
+    });
+  };
+
   const movePreviewDinner = (fromKey, toKey) => {
     setPreviewModal(prev => {
       if (!prev) return prev;
@@ -9224,6 +9362,7 @@ function AutoPlanScreen({
           rerolling={genLoading}
           rerollSeed={rerollSeed}
           swapped={previewModal.swapped}
+          onClearNote={clearExistingNote}
         />
       )}
 
