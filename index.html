@@ -4563,7 +4563,13 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
       {/* 7-day strip */}
       <div style={{ display:'flex', gap:3, padding:'0 12px 10px' }}>
         {weekData.map((d, i) => {
-          const hasContent = dayHasContent(d);
+          /* Meals and notes get their own marks. One dot for "this day has
+             something" meant a day carrying a note looked exactly like a day
+             carrying a dinner — so a note nobody remembered writing sat there
+             unseen until someone tapped that particular day. */
+          const bCount = Array.isArray(d.meals && d.meals.b) ? d.meals.b.length : 0;
+          const hasMeals = !!(d.meals && (d.meals.d || bCount || (d.meals.snacks || []).length));
+          const noteCount = (d.tasks || []).length;
           return (
             <div
               key={i}
@@ -4576,13 +4582,48 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
             >
               <span style={{ fontSize:16, color: i===selected ? 'var(--purple-light)' : d.today ? '#6d44b0' : 'var(--text-dim)' }}>{d.d}</span>
               <span style={{ fontSize:25, fontWeight:600, color: i===selected ? 'var(--text)' : d.today ? '#ccc' : '#888' }}>{d.n}</span>
-              {hasContent && (
-                <span style={{ width:4, height:4, borderRadius:'50%', background: i===selected ? 'var(--purple-light)' : 'var(--purple)', display:'block' }} />
-              )}
+              <span style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:3, height:8 }}>
+                {hasMeals && (
+                  <span style={{ width:4, height:4, borderRadius:'50%',
+                                 background: i===selected ? 'var(--purple-light)' : 'var(--purple)' }} />
+                )}
+                {noteCount > 0 && (
+                  <span
+                    title={`${noteCount} note${noteCount === 1 ? '' : 's'} on this day`}
+                    style={{ width:5, height:5, borderRadius:1, background:'#e2c890' }}
+                  />
+                )}
+              </span>
             </div>
           );
         })}
       </div>
+
+      {(() => {
+        // The whole week at a glance: which days carry a note, without
+        // tapping through seven of them to find out.
+        const noteDays = weekData
+          .map((d, i) => ({ i, label: `${d.label} ${d.n}`, n: (d.tasks || []).length }))
+          .filter(x => x.n > 0);
+        if (!noteDays.length) return null;
+        const total = noteDays.reduce((a, x) => a + x.n, 0);
+        return (
+          <div style={{
+            margin:'0 12px 8px', padding:'7px 10px', borderRadius:8,
+            background:'rgba(226,200,144,0.08)', border:'1px solid rgba(226,200,144,0.3)',
+            fontSize:14, color:'#e2c890', display:'flex', gap:8, alignItems:'center', flexWrap:'wrap',
+          }}>
+            <span>📌 {total} note{total === 1 ? '' : 's'} this week:</span>
+            {noteDays.map(x => (
+              <span
+                key={x.i}
+                onClick={() => setSelected(x.i)}
+                style={{ cursor:'pointer', textDecoration:'underline', textUnderlineOffset:'3px' }}
+              >{x.label}</span>
+            ))}
+          </div>
+        );
+      })()}
 
       <div className="divider" style={{ margin:'0 16px 8px' }} />
 
