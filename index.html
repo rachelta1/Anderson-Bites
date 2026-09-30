@@ -4535,6 +4535,28 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
   };
 
   const openMeal = (slot) => setModal({ type:'recipe', slot });
+  /* The note saved on a recipe — "use thighs instead of breasts" — shown on
+     the day itself. Whoever is cooking reads the day, not the recipe library,
+     and a note written weeks ago for one particular night otherwise sits
+     invisible until they open the recipe to cook from it. */
+  const noteForMeal = (name) => {
+    const r = (recipeDB || []).find(x => x && x.name === name);
+    return (r && (r.notes || '').trim()) || '';
+  };
+  const MealNote = ({ name }) => {
+    const note = noteForMeal(name);
+    if (!note) return null;
+    return (
+      <div style={{
+        fontSize:15, color:'#8fc9e8', lineHeight:1.45, marginTop:4,
+        background:'rgba(143,201,232,0.08)', border:'1px solid rgba(143,201,232,0.32)',
+        borderRadius:6, padding:'6px 9px', display:'flex', gap:6, alignItems:'flex-start',
+      }}>
+        <span>📝</span><span style={{ flex:1, minWidth:0, overflowWrap:'anywhere' }}>{note}</span>
+      </div>
+    );
+  };
+
   const openTaskNew = () => setModal({ type:'task', initial:'', taskIdx:null });
   const openTaskEdit = (idx) => setModal({ type:'task', initial: day.tasks[idx], taskIdx: idx });
 
@@ -4648,6 +4670,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
             <span className="meal-slot-del" onClick={(e) => { e.stopPropagation(); deleteMeal({ kind:'b', idx: bi }); }}>×</span>
           </div>
         ))}
+        {(Array.isArray(day.meals.b) ? day.meals.b : []).map((bName, i) => <MealNote key={`bn-${i}`} name={bName} />)}
 
         {day.meals.d && (
           <div className="meal-slot" onClick={() => onMealClick && onMealClick(day.meals.d)} style={{ cursor:'pointer' }}>
@@ -4661,6 +4684,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
             <span className="meal-slot-del" onClick={(e) => { e.stopPropagation(); deleteMeal('d'); }}>×</span>
           </div>
         )}
+        {day.meals.d && <MealNote name={day.meals.d} />}
 
         {/* Snacks / extra meals */}
         {(day.meals.snacks || []).map((s, i) => (
@@ -4675,6 +4699,7 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
             <span className="meal-slot-del" onClick={(e) => { e.stopPropagation(); deleteMeal(i); }}>×</span>
           </div>
         ))}
+        {(day.meals.snacks || []).map((sName, i) => <MealNote key={`sn-${i}`} name={sName} />)}
 
         <div
           className="meal-slot ghost"
@@ -5450,7 +5475,37 @@ function RecipePeekSheet({ recipe, onClose }) {
    to the existing-meals overwrite/append flow (or directly applies the
    plan if no day conflicts). Recipe rows are tappable → opens RecipePeekSheet
    layered on top so the user can inspect a dish before confirming/rerolling. ── */
-function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed, swapped, onClearNote }) {
+/* A note saved on a RECIPE — "use thighs instead of breasts" — as opposed to
+   a note on a day. It travels with the recipe into every future plan, so one
+   written months ago for one particular night is still there, still read, and
+   still followed. Surfaced at the moment the recipe is drafted in, which is
+   the moment it can be dealt with. */
+function RecipeNoteFlag({ recipe, recipeNotes, onClear }) {
+  if (!recipe || !recipe.name) return null;
+  const note = ((recipeNotes && recipeNotes[recipe.name]) || '').trim();
+  if (!note) return null;
+  return (
+    <div style={{
+      fontSize:14, color:'#8fc9e8', display:'flex', gap:6, alignItems:'flex-start',
+      background:'rgba(143,201,232,0.08)', border:'1px solid rgba(143,201,232,0.32)',
+      borderRadius:6, padding:'5px 8px', marginTop:4, marginLeft:20,
+    }}>
+      <span>📝</span>
+      <span style={{ flex:1, minWidth:0, overflowWrap:'anywhere' }}>
+        <b>Note on {recipe.name}:</b> {note}
+      </span>
+      {onClear && (
+        <span
+          onClick={(e) => { e.stopPropagation(); onClear(recipe.name); }}
+          title="Clear this recipe's note"
+          style={{ cursor:'pointer', padding:'2px 8px', fontSize:19, color:'#e29090', lineHeight:1 }}
+        >×</span>
+      )}
+    </div>
+  );
+}
+
+function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm, onCancel, onReroll, onMoveDinner, rerolling, rerollSeed, swapped, onClearNote, recipeNotes, onClearRecipeNote }) {
   const [rerollNote, setRerollNote] = useState('');
   // Lookup table from weekOffset+slotIdx → friendly day chip ({ label, n, month, d })
   /* A stored slot is only useful here if it actually carries its display
@@ -5691,6 +5746,9 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                       </div>
                     );
                   })}
+                  {bfList.map((b, i) => (
+                    <RecipeNoteFlag key={`bn-${i}`} recipe={b} recipeNotes={recipeNotes} onClear={onClearRecipeNote} />
+                  ))}
                   {dinner && (() => {
                     const peekable = isPeekable(dinner);
                     return (
@@ -5722,6 +5780,7 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                       </div>
                     );
                   })()}
+                  <RecipeNoteFlag recipe={dinner} recipeNotes={recipeNotes} onClear={onClearRecipeNote} />
                   {/* A second dinner dropped onto this day. Shown under the
                       first so it is obvious the day now holds both, rather
                       than the drop having replaced what was there. */}
@@ -5738,6 +5797,9 @@ function PreviewPlanModal({ perDay, weekMap, weekTitle, pantryStaples, onConfirm
                       </span>
                       {isPeekable(x) && <span style={{ color:'var(--text-dimmer)', fontSize:15 }}>›</span>}
                     </div>
+                  ))}
+                  {(extras || []).map((x, i) => (
+                    <RecipeNoteFlag key={`xn-${i}`} recipe={x} recipeNotes={recipeNotes} onClear={onClearRecipeNote} />
                   ))}
                   {(dayTasks || []).map((t, i) => (
                     <div key={`t-${i}`} style={{ fontSize:15, color:'var(--text-dim)', display:'flex', gap:6 }}>
@@ -8409,7 +8471,7 @@ const RECENT_DINNERS_CAP = 20;
 
 function AutoPlanScreen({
   onTab,
-  recipeDB,
+  recipeDB, setRecipeDB,
   weekMap, setWeekMap,
   cookingHistory, setCookingHistory,
   pantryStaples,
@@ -9154,6 +9216,20 @@ function AutoPlanScreen({
   /* Clear a leftover note straight from the preview. The moment you notice it
      is the moment to deal with it — otherwise it means confirming, going to
      the week, finding the day and deleting it there. */
+  /* Read the notes live from the library rather than off the recipe objects
+     captured when the plan was generated — otherwise clearing one here, or
+     editing it on the recipe, would leave the flag showing the old text. */
+  const recipeNotes = (() => {
+    const m = {};
+    (recipeDB || []).forEach(r => { if (r && r.name && (r.notes || '').trim()) m[r.name] = r.notes; });
+    return m;
+  })();
+
+  const clearRecipeNote = (recipeName) => {
+    if (!setRecipeDB) return;
+    setRecipeDB(prev => prev.map(r => (r && r.name === recipeName) ? { ...r, notes: '' } : r));
+  };
+
   const clearExistingNote = (weekOffset, slotIdx, taskName) => {
     setWeekMap(prev => {
       const week = prev[weekOffset];
@@ -9404,6 +9480,8 @@ function AutoPlanScreen({
           rerollSeed={rerollSeed}
           swapped={previewModal.swapped}
           onClearNote={clearExistingNote}
+          recipeNotes={recipeNotes}
+          onClearRecipeNote={clearRecipeNote}
         />
       )}
 
@@ -10163,6 +10241,7 @@ function App() {
       case 4: return <AutoPlanScreen
         onTab={handleTab}
         recipeDB={recipeDB}
+        setRecipeDB={setRecipeDB}
         weekMap={weekMap}
         setWeekMap={setWeekMap}
         cookingHistory={cookingHistory}
