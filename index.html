@@ -1359,6 +1359,18 @@ const NEVER_STAPLE_PATTERNS = [
   // Green/spring onions are bunched produce, distinct from the "onion" pantry staple.
   /\b(green|spring)\s+onions?\b/i,
   /\bscallions?\b/i,
+  /* Meat, fish and seafood are NEVER pantry. Nothing protected them before,
+     so one broad entry in the pantry list — "chicken", say, which is a single
+     tap in the Pantry sheet and then sticks — quietly took every chicken line
+     off the shopping, and a single mis-label from the grocery classifier did
+     the same for one item. This is the most expensive thing on the list and
+     the one a shop genuinely can't do without, so it gets a hard floor.
+
+     The lookahead keeps the shelf-stable products that merely NAME an animal
+     — chicken broth, beef stock, fish sauce, bouillon, and the seasonings
+     ("montreal steak seasoning", "rotisserie chicken seasoning") — classified
+     as staples, which is what they are. */
+  /^(?!.*\b(broth|stock|bouillon|sauce|seasoning|rub|powder|paste|extract|granules?)\b)(?=.*\b(chicken|beef|pork|lamb|veal|turkey|duck|ham|bacon|sausage|salami|prosciutto|chorizo|pepperoni|salmon|tuna|cod|tilapia|halibut|haddock|trout|snapper|shrimp|prawns?|scallops?|crab|lobster|mussels?|clams?|oysters?|anchov\w+|steak|mince|brisket|tenderloin|sirloin|ribs?|thighs?|drumsticks?|cutlets?|chops?|fillets?|roast)\b).*$/i,
 ];
 function isNeverStaple(name) {
   const lo = (name || '').toLowerCase();
@@ -8791,6 +8803,7 @@ function AutoPlanScreen({
     let prunedStaples = 0;
     {
       const before = nextList.length;
+      const beforeList = nextList;
       nextList = nextList.filter(it => {
         if (/manual/i.test(it.src || '')) return true;
         if (it.edited) return true; // the user put this wording here on purpose
@@ -8809,6 +8822,14 @@ function AutoPlanScreen({
         if (cached && typeof cached === 'object' && cached.isStaple) return false;
         return true;
       });
+      if (before !== nextList.length) {
+        // Naming them matters: "3 staples skipped" in a status line that
+        // vanishes after six seconds is how an ingredient goes missing from a
+        // shop without anyone being able to say which.
+        const kept = new Set(nextList.map(it => it.n));
+        console.warn('[applyPlan] removed as pantry staples:',
+          beforeList.filter(it => !kept.has(it.n)).map(it => it.n));
+      }
       prunedStaples += before - nextList.length;
       // Items that survived may have been newly-added during this apply —
       // recompute added so the status line is honest.
@@ -8844,6 +8865,7 @@ function AutoPlanScreen({
           if (Object.keys(updates).length) setCatCache(prev => ({ ...prev, ...updates }));
           if (stapleKeys.size) {
             const before = nextList.length;
+            const beforeLlm = nextList;
             // Drop staples — but keep manually-added items even if Claude says staple.
             nextList = nextList.filter(it => {
               const lo = (it.n || '').toLowerCase();
@@ -8853,6 +8875,11 @@ function AutoPlanScreen({
               return false;
             });
             const justPruned = before - nextList.length;
+            if (justPruned) {
+              const kept = new Set(nextList.map(it => it.n));
+              console.warn('[applyPlan] removed after Claude classified them as staples:',
+                beforeLlm.filter(it => !kept.has(it.n)).map(it => it.n));
+            }
             prunedStaples += justPruned;
             // The items that survive may have been newly-added during this
             // apply — recompute the added counter so the status line is honest.
