@@ -5135,9 +5135,16 @@ function itemKeys(it) {
   ((it && it.akas) || []).forEach(k => { if (k && !keys.includes(k)) keys.push(k); });
   return keys.filter(Boolean);
 }
+/* An item can now have a ticked row (bought for one meal) and an open row
+   (still needed for another). Anything acting on "the" row for an item —
+   tapping an ingredient, adding a recipe — means the one still to buy, so
+   that wins; a ticked row is only the answer when it is the only one. */
 function findItemIndex(list, key) {
   if (!key) return -1;
-  return (list || []).findIndex(it => itemKeys(it).includes(key));
+  const arr = list || [];
+  const open = arr.findIndex(it => it && !it.done && itemKeys(it).includes(key));
+  if (open !== -1) return open;
+  return arr.findIndex(it => itemKeys(it).includes(key));
 }
 
 /* ── "either/or" ingredients ──
@@ -7616,7 +7623,12 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
     const m = {};
     // Index every key an item answers to, so a recipe ingredient still reads
     // as "on the list" after the user renamed the row it landed on.
-    (groceryList || []).forEach(it => { if (it && it.n) itemKeys(it).forEach(k => { m[k] = it; }); });
+    (groceryList || []).forEach(it => {
+      if (!it || !it.n) return;
+      // An open row beats a ticked one for the same item: the checkbox here
+      // should reflect what's still to buy, not last week's purchase.
+      itemKeys(it).forEach(k => { if (!m[k] || (m[k].done && !it.done)) m[k] = it; });
+    });
     return m;
   })();
   const groceryNames = new Set(Object.keys(groceryByName));
@@ -7671,7 +7683,9 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
           // ingredient this recipe already put on the list adds nothing, so
           // clearing the tick just made a bought item look unbought.
           const alreadyMine = sSet.has(recipeName);
-          const q = alreadyMine ? it.q : sumQtyStrings([it.q, parsed.q]);
+          // Reopening a bought row: show only what this recipe still needs,
+          // not the bought amount folded back in.
+          const q = alreadyMine ? it.q : (it.done ? (parsed.q || '') : sumQtyStrings([it.q, parsed.q]));
           sSet.add(recipeName);
           next[idx] = { ...it, q, n: it.edited ? it.n : preferredItemName(it.n, itemName, q),
                         src: [...sSet].join(' + '), done: alreadyMine ? it.done : false };
@@ -7747,7 +7761,7 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
             const it = next[idx];
             const sSet = new Set((it.src || '').split(' + ').map(s => s.trim()).filter(Boolean));
             const alreadyMine = sSet.has(recipeName);
-            const nq = alreadyMine ? it.q : sumQtyStrings([it.q, q]);
+            const nq = alreadyMine ? it.q : (it.done ? (q || '') : sumQtyStrings([it.q, q]));
             sSet.add(recipeName);
             next[idx] = { ...it, q: nq, n: it.edited ? it.n : preferredItemName(it.n, name, nq),
                           src: [...sSet].join(' + '), done: alreadyMine ? it.done : false };
@@ -8747,41 +8761,71 @@ function AutoPlanScreen({
       nextList = nextList.filter(it => !alreadyHave(it.n));
       haveSkipped += before - nextList.length;
     }
-    /* What was ticked off before this apply started. Rewriting a day drops any
-       row whose only source was that day, and re-aggregation then adds it back
-       as a brand-new, unticked row — so an item the user had already bought
-       reappeared on the list. Anything that comes back under the same key gets
-       its tick back. */
-    const wasDone = new Set();
-    groceryList.forEach(it => { if (it && it.done) itemKeys(it).forEach(k => wasDone.add(k)); });
+    /* What has already been BOUGHT. A tick means "I've bought what these meals
+       need" — it belongs to the meals named in the row's src, not to the item.
 
+       The previous version keyed it on the item name, so last week's ticked
+       ground beef made this week's ground beef arrive already ticked — and
+       ticked rows are hidden on the list by default, so a protein bought most
+       weeks simply never appeared. Carrying a tick forward is right only when
+       the SAME need is regenerated (re-applying a plan over the same days),
+       which is exactly the case where the src matches. */
+    const boughtSrcs = new Set();
+    groceryList.forEach(it => {
+      if (!it || !it.done) return;
+      (it.src || '').split(' + ').map(x => x.trim()).filter(Boolean).forEach(x => boughtSrcs.add(x));
+    });
+
+    /* One row per item — the List screen's dedupe pass enforces that, and it
+       exists for a reason (two copies of one name meant a tap flipped both,
+       the "ghost garlic" bug). So the rule is about the ROW's state:
+
+       - New sources that are all already bought (the same need regenerated,
+         e.g. re-applying a plan over the same days) keep the row ticked.
+       - Any genuinely new source reopens it, and when a ticked row reopens,
+         its amount becomes only what is still to buy. It used to keep the
+         tick — the extra pound for Monday was filed under "bought" for
+         Thursday and hidden. Showing the combined total instead would have it
+         visible but over-bought; "1 lb still to get" is the true answer. */
     const indexByName = {};
-    nextList.forEach((it, i) => { itemKeys(it).forEach(k => { indexByName[k] = i; }); });
+    nextList.forEach((it, i) => { itemKeys(it).forEach(k => {
+      // If a ticked and an open row both answer to a key, merge into the open one.
+      if (indexByName[k] == null || (nextList[indexByName[k]].done && !it.done)) indexByName[k] = i;
+    }); });
+
     let added = 0, merged = 0;
     Object.values(aggregated).forEach(({ name, contribs, srcs }) => {
       const key = groceryKey(name);
-      const srcStr = [...srcs].join(' + ');
+      const allSrcs = [...srcs];
+      const allBought = allSrcs.length > 0 && allSrcs.every(x => boughtSrcs.has(x));
       if (indexByName[key] != null) {
         const i = indexByName[key];
-        const existingSrcs = (nextList[i].src || '').split(' + ').map(s => s.trim()).filter(Boolean);
+        const row = nextList[i];
+        const existingSrcs = (row.src || '').split(' + ').map(x => x.trim()).filter(Boolean);
         const existingSrcSet = new Set(existingSrcs);
-        const mergedSrcs = new Set([...existingSrcs, ...srcs]);
-        // Only ADD quantities from sources not already counted on this item —
-        // re-applying a plan in append mode must not double the ground beef.
-        const newContribs = contribs.filter(c => !existingSrcSet.has(c.src));
-        const nq = sumQtyStrings([nextList[i].q, ...newContribs.map(c => c.q)]);
+        // Contributions this row hasn't counted yet. Re-applying a plan must
+        // not double the ground beef.
+        const fresh = contribs.filter(c => !existingSrcSet.has(c.src));
+        const freshNeed = fresh.filter(c => !boughtSrcs.has(c.src));
+        const reopening = row.done && freshNeed.length > 0;
+        const nq = reopening
+          ? sumQtyStrings(freshNeed.map(c => c.q))            // only what's still to buy
+          : sumQtyStrings([row.q, ...fresh.map(c => c.q)]);
         nextList[i] = {
-          ...nextList[i],
-          src: [...mergedSrcs].join(' + '),
+          ...row,
+          src: [...new Set([...existingSrcs, ...allSrcs])].join(' + '),
           q: nq,
-          n: nextList[i].edited ? nextList[i].n : preferredItemName(nextList[i].n, name, nq),
+          n: row.edited ? row.n : preferredItemName(row.n, name, nq),
+          done: reopening ? false : row.done,
         };
         merged++;
       } else {
         nextList.push({
-          q: sumQtyStrings(contribs.map(c => c.q)), n: name, src: srcStr,
-          done: wasDone.has(key),
+          q: sumQtyStrings(contribs.map(c => c.q)), n: name, src: allSrcs.join(' + '),
+          // Ticked only when every meal it's for was already bought for.
+          done: allBought,
         });
+        indexByName[key] = nextList.length - 1;
         added++;
       }
     });
