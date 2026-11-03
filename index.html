@@ -4321,7 +4321,8 @@ function dayHasContent(d) {
   return !!(d && d.meals && ((d.meals.b && d.meals.b.length) || d.meals.d || (d.meals.snacks && d.meals.snacks.length) || (d.tasks && d.tasks.length)));
 }
 
-function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, weekMap, setWeekMap, recipeDB, onMealClick, onSettings, setGroceryList }) {
+function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, weekMap, setWeekMap, recipeDB, onMealClick, onSettings, groceryList, setGroceryList }) {
+  const [groceryAsk, setGroceryAsk] = useState(null); // { name, matches }
   const [selected, setSelected] = useState(() => {
     const idx = weekData.findIndex(d => d.today);
     return idx >= 0 ? idx : 0;
@@ -4374,6 +4375,31 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
   };
 
   const deleteMeal = (slot) => {
+    // What's being deleted, so its shopping can be offered for removal too.
+    const cur = weekData[selected];
+    let name = null;
+    if (cur) {
+      const bNow = Array.isArray(cur.meals.b) ? cur.meals.b : [];
+      if (slot && typeof slot === 'object' && slot.kind === 'b') name = bNow[slot.idx];
+      else if (slot === 'd') name = cur.meals.d;
+      else if (typeof slot === 'number') name = (cur.meals.snacks || [])[slot];
+    }
+    if (name && groceryList && setGroceryList) {
+      const dt = `${cur.month} ${cur.n}`;
+      // Count the meal across the calendar. A row added from the recipe page
+      // carries just the recipe name; it belongs to this meal only if the
+      // recipe isn't planned anywhere else.
+      const count = JSON.stringify(weekMap || {}).split(JSON.stringify(name)).length - 1;
+      const elsewhere = count > 1;
+      const matches = (seg) => seg === `${dt} · ${name}` ||
+        (!elsewhere && seg === name) ||
+        // "Mon Oct 19 · X" from older plans
+        (seg.endsWith(` · ${name}`) && new RegExp(`(^|\\s)${dt}$`).test(seg.split(' · ')[0].trim()));
+      const recipe = (recipeDB || []).find(r => r.name === name);
+      const { affected } = planMealGroceryRemoval(groceryList, matches, recipe);
+      if (affected.some(a => !a.done)) setGroceryAsk({ name, matches, recipe, affected });
+      else if (affected.length) setGroceryList(prev => planMealGroceryRemoval(prev, matches, recipe).next);
+    }
     updateDay(d => {
       const bArr = Array.isArray(d.meals.b) ? [...d.meals.b] : [];
       if (slot && typeof slot === 'object' && slot.kind === 'b') {
@@ -4717,6 +4743,20 @@ function WeekScreen({ onTab, weekData, setWeekData, weekOffset, setWeekOffset, w
         <div style={{ height:12 }} />
       </div>
 
+      {groceryAsk && (
+        <ConfirmSheet
+          title="Take it off the grocery list too?"
+          body={groceryRemovalBody(groceryAsk.name, groceryAsk.affected)}
+          confirmLabel="Remove"
+          cancelLabel="Keep on list"
+          onConfirm={() => {
+            const { matches, recipe } = groceryAsk;
+            setGroceryList(prev => planMealGroceryRemoval(prev, matches, recipe).next);
+            setGroceryAsk(null);
+          }}
+          onClose={() => setGroceryAsk(null)}
+        />
+      )}
       <TabBar active={0} onTab={onTab} />
 
       {modal?.type === 'recipe' && (
@@ -5145,6 +5185,65 @@ function findItemIndex(list, key) {
   const open = arr.findIndex(it => it && !it.done && itemKeys(it).includes(key));
   if (open !== -1) return open;
   return arr.findIndex(it => itemKeys(it).includes(key));
+}
+
+/* ── Taking a meal's shopping back off the list ──
+   Used when a meal is deleted from the calendar or a recipe from the library.
+   Rows only this meal needed go; rows other meals also need stay, with this
+   meal's amount taken off when the units line up (otherwise the amount is
+   left alone — buying a bit extra beats running short). Rows you added by
+   hand are never touched. */
+function subtractQtyStrings(total, part) {
+  const t = String(total || '').trim(), pt = String(part || '').trim();
+  if (!t || !pt) return null;
+  const groups = new Map(), order = [];
+  for (const seg of t.split(' + ').map(x => x.trim()).filter(Boolean)) {
+    const g = parseQtySegment(seg);
+    if (!g || groups.has(g.key)) return null;
+    groups.set(g.key, g); order.push(g.key);
+  }
+  for (const seg of pt.split(' + ').map(x => x.trim()).filter(Boolean)) {
+    const g = parseQtySegment(seg);
+    const tg = g && groups.get(g.key);
+    if (!tg || g.num > tg.num + 1e-9) return null;
+    tg.num -= g.num;
+  }
+  const left = order.map(k => groups.get(k)).filter(g => g.num > 1e-9);
+  if (!left.length) return null;
+  return sumQtyStrings(left.map(g => g.rawUnit ? `${formatQtyNum(g.num)} ${g.rawUnit}` : formatQtyNum(g.num)));
+}
+
+function planMealGroceryRemoval(list, segMatches, recipe) {
+  // This meal's amount of each item. Library recipes keep full lines
+  // ("1 pound ground beef", scaled to how many you're cooking for); the
+  // built-in seed shape is { name, quantity }.
+  const ingQty = {};
+  const lines = recipe ? (scaledQtyLines(recipe) || []) : [];
+  lines.forEach(line => {
+    if (!line) return;
+    const p = parseItem(String(line));
+    const k = p && groceryKey(p.n);
+    if (k && p.q && ingQty[k] == null) ingQty[k] = p.q;
+  });
+  ((recipe && recipe.ingredients) || []).forEach(ing => {
+    if (!ing || typeof ing !== 'object' || !ing.name) return;
+    const k = groceryKey(ing.name);
+    if (k && ingQty[k] == null) ingQty[k] = ing.quantity || '';
+  });
+  const affected = [];
+  const next = [];
+  (list || []).forEach(it => {
+    const segs = ((it && it.src) || '').split(' + ').map(x => x.trim()).filter(Boolean);
+    const kept = segs.filter(x => !segMatches(x));
+    if (!it || kept.length === segs.length) { next.push(it); return; }
+    if (kept.length === 0) { affected.push({ n: it.n, q: it.q, done: !!it.done, gone: true }); return; }
+    const k = itemKeys(it).find(x => ingQty[x] != null);
+    const less = k != null ? subtractQtyStrings(it.q, ingQty[k]) : null;
+    const q = less || it.q;
+    affected.push({ n: it.n, q, done: !!it.done, gone: false });
+    next.push({ ...it, src: kept.join(' + '), q });
+  });
+  return { next, affected };
 }
 
 /* ── "either/or" ingredients ──
@@ -6992,7 +7091,20 @@ function SettingsSheet({ apiKey, setApiKey, onClose }) {
   );
 }
 
-function ConfirmSheet({ title, body, confirmLabel, onConfirm, onClose }) {
+function groceryRemovalBody(name, affected) {
+  const open = affected.filter(a => !a.done);
+  const gone = open.filter(a => a.gone), less = open.filter(a => !a.gone);
+  const fmt = a => (a.q ? a.q + ' ' : '') + a.n;
+  return (
+    <div>
+      <div style={{ marginBottom:8 }}>"{name}" put these on your grocery list:</div>
+      {gone.length > 0 && <div style={{ marginBottom:6 }}><b>Remove:</b> {gone.map(fmt).join(', ')}</div>}
+      {less.length > 0 && <div style={{ marginBottom:6 }}><b>Keep for other meals:</b> {less.map(fmt).join(', ')}</div>}
+    </div>
+  );
+}
+
+function ConfirmSheet({ title, body, confirmLabel, cancelLabel, onConfirm, onClose }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-sheet" onClick={e => e.stopPropagation()}>
@@ -7003,7 +7115,7 @@ function ConfirmSheet({ title, body, confirmLabel, onConfirm, onClose }) {
         </div>
         <div style={{ fontSize:16, color:'#bbb', marginBottom:6, lineHeight:1.5 }}>{body}</div>
         <div className="btn-wrap" style={{ padding:'14px 0 4px', display:'flex', gap:8 }}>
-          <div className="gen-btn" style={{ flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)' }} onClick={onClose}>Cancel</div>
+          <div className="gen-btn" style={{ flex:1, background:'#202030', color:'#aaa', border:'1.5px solid var(--border)' }} onClick={onClose}>{cancelLabel || 'Cancel'}</div>
           <div className="danger-btn" style={{ flex:1 }} onClick={onConfirm}>{confirmLabel || 'Delete'}</div>
         </div>
       </div>
@@ -7785,10 +7897,19 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
                  : (r.tags || []).includes('soup') ? 'soup'
                  : 'dinner';
 
-  const handleDelete = () => {
+  const [groceryAsk, setGroceryAsk] = useState(null);
+  const finishDelete = () => {
     if (setRecipeDB) setRecipeDB(prev => prev.filter(x => x.id !== r.id));
-    setConfirmDel(false);
+    setGroceryAsk(null);
     onBack();
+  };
+  const handleDelete = () => {
+    setConfirmDel(false);
+    // Anything this recipe put on the list, from any day or the recipe page.
+    const matches = (seg) => seg === r.name || seg.endsWith(` · ${r.name}`);
+    const { affected } = planMealGroceryRemoval(groceryList || [], matches, r);
+    if (setGroceryList && affected.some(a => !a.done)) { setGroceryAsk({ matches, affected }); return; }
+    finishDelete();
   };
 
   // Photo changes write straight to the library, same as notes. Resetting
@@ -8324,6 +8445,20 @@ function RecipeDetailScreen({ recipe, onBack, onTab, weekMap, setWeekMap, recipe
           onClose={() => setConfirmDel(false)}
         />
       )}
+      {groceryAsk && (
+        <ConfirmSheet
+          title="Take it off the grocery list too?"
+          body={groceryRemovalBody(r.name, groceryAsk.affected)}
+          confirmLabel="Remove"
+          cancelLabel="Keep on list"
+          onConfirm={() => {
+            const m = groceryAsk.matches;
+            setGroceryList(prev => planMealGroceryRemoval(prev, m, r).next);
+            finishDelete();
+          }}
+          onClose={finishDelete}
+        />
+      )}
 
       <TabBar active={2} onTab={onTab} />
     </div>
@@ -8610,6 +8745,37 @@ function AutoPlanScreen({
     });
     setWeekMap(updatedWeeks);
 
+    /* Meals already sitting on the days being filled — put there by hand from
+       the week view or "Add to Calendar", neither of which touches the grocery
+       list — used to get no shopping at all, because only meals this run wrote
+       were aggregated. A ground-beef dinner placed on Tuesday never had its
+       beef added. Any such meal with nothing on the list yet (not even a
+       ticked row) gets its groceries now. Only for "Fill in the gaps":
+       "Replace everything" rewrites those days anyway. */
+    const alreadyPlanned = [];
+    if (mode !== 'overwrite') {
+      const listSrcs = new Set();
+      groceryList.forEach(it => ((it && it.src) || '').split(' + ')
+        .forEach(x => { const t = x.trim(); if (t) listSrcs.add(t); }));
+      const writtenKeys = new Set(written.map(w => w.dt + '|' + w.recipe.name));
+      perDay.forEach(({ weekOffset, slotIdx, dt }) => {
+        const slot = (updatedWeeks[weekOffset] || [])[slotIdx];
+        if (!slot || !slot.meals) return;
+        const names = [
+          slot.meals.d,
+          ...(Array.isArray(slot.meals.b) ? slot.meals.b : (slot.meals.b ? [slot.meals.b] : [])),
+          ...(slot.meals.snacks || []),
+        ].filter(Boolean);
+        names.forEach(name => {
+          if (writtenKeys.has(dt + '|' + name)) return;
+          const onList = [...listSrcs].some(x => x === name || (x.endsWith(' · ' + name) && x.split(' · ')[0].trim().endsWith(dt)));
+          if (onList) return;
+          const recipe = recipeDB.find(r => r.name === name);
+          if (recipe) alreadyPlanned.push({ dt, recipe });
+        });
+      });
+    }
+
     // 2. Append cooking history for written meals
     if (written.length) {
       const histAdds = written.map(({ dt, recipe }) => ({
@@ -8636,7 +8802,7 @@ function AutoPlanScreen({
     const aggregated = {}; // key=groceryKey(name) → { name, contribs:[], srcs:Set }
     const missingIngredients = []; // diagnostic — recipes the picker chose but we couldn't aggregate
     let haveSkipped = 0;
-    written.forEach(({ dt, recipe }) => {
+    [...written, ...alreadyPlanned].forEach(({ dt, recipe }) => {
       const ings = recipe.ingredients || [];
       const qtys = scaledQtyLines(recipe);
       if (!ings.length) {
@@ -10202,6 +10368,7 @@ function App() {
           if (r) handleRecipeDetail(r);
         }}
         onSettings={() => setShowSettings(true)}
+        groceryList={groceryList}
         setGroceryList={setGroceryList}
       />;
       case 1: return <GroceryScreen
